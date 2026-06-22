@@ -398,6 +398,19 @@ class AgentSessionLaunchTest(unittest.TestCase):
             open_mock.assert_not_called()
 
 
+class RunEventHubTest(unittest.TestCase):
+    def test_run_event_hub_notifies_subscribers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            hub = module.RunEventHub()
+            subscriber = hub.subscribe()
+            hub.publish({"type": "run_started", "runId": "run_1"})
+            self.assertEqual(subscriber.get_nowait()["runId"], "run_1")
+            hub.unsubscribe(subscriber)
+            hub.publish({"type": "run_finished", "runId": "run_1"})
+            self.assertTrue(subscriber.empty())
+
+
 class SchedulerTest(unittest.TestCase):
     def test_scheduler_waits_until_next_scheduled_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:

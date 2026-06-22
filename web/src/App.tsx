@@ -19,7 +19,12 @@ import type {
 } from './types';
 import type { TemplateDefinition } from './lib/templates';
 import { templateScheduleDraft } from './lib/templates';
-import { defaultScheduleDraft, scheduleDraftFromAutomation } from './lib/schedule';
+import {
+  ACTIVE_AUTOMATION_POLL_MS,
+  defaultScheduleDraft,
+  isAutomationActive,
+  scheduleDraftFromAutomation,
+} from './lib/schedule';
 
 type LoadState = {
   automations: Automation[];
@@ -162,14 +167,28 @@ export function App() {
   }, [inboxAutomationId]);
 
   useEffect(() => {
-    const hasActive = state.automations.some(
-      (item) => item.activeRunId && ['queued', 'running', 'canceling'].includes(item.activeRunStatus ?? ''),
-    );
-    if (!hasActive) return;
-    const timer = window.setInterval(() => {
+    const refresh = () => {
       void loadAutomations();
       if (inboxAutomationId) void loadRuns(inboxAutomationId);
-    }, 3000);
+    };
+
+    const source = new EventSource('/api/events');
+    source.onmessage = refresh;
+
+    return () => {
+      source.close();
+    };
+  }, [inboxAutomationId, loadAutomations, loadRuns]);
+
+  useEffect(() => {
+    if (!state.automations.some(isAutomationActive)) return;
+
+    const refresh = () => {
+      void loadAutomations();
+      if (inboxAutomationId) void loadRuns(inboxAutomationId);
+    };
+
+    const timer = window.setInterval(refresh, ACTIVE_AUTOMATION_POLL_MS);
     return () => window.clearInterval(timer);
   }, [inboxAutomationId, loadAutomations, loadRuns, state.automations]);
 

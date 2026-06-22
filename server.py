@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import re
 import shlex
 import signal
@@ -1405,6 +1406,69 @@ def relative_label(root, path):
         return str(path)
 
 
+class RunEventHub:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._subscribers = []
+
+    def subscribe(self):
+        subscriber = queue.Queue()
+        with self._lock:
+            self._subscribers.append(subscriber)
+        return subscriber
+
+    def unsubscribe(self, subscriber):
+        with self._lock:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
+
+    def publish(self, event):
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(event)
+            except queue.Full:
+                pass
+
+
+RUN_EVENTS = RunEventHub()
+
+
+def publish_run_started(run):
+    if not isinstance(run, dict):
+        return
+    automation_id = clean_optional_string(run.get("automationId"))
+    run_id = clean_optional_string(run.get("id"))
+    if not automation_id or not run_id:
+        return
+    RUN_EVENTS.publish(
+        {
+            "type": "run_started",
+            "automationId": automation_id,
+            "runId": run_id,
+            "runStatus": clean_optional_string(run.get("runStatus")) or "queued",
+        }
+    )
+
+
+def publish_run_finished(run):
+    if not isinstance(run, dict):
+        return
+    automation_id = clean_optional_string(run.get("automationId"))
+    run_id = clean_optional_string(run.get("id"))
+    if not automation_id or not run_id:
+        return
+    RUN_EVENTS.publish(
+        {
+            "type": "run_finished",
+            "automationId": automation_id,
+            "runId": run_id,
+            "runStatus": clean_optional_string(run.get("runStatus")) or "",
+        }
+    )
+
+
 class Runner:
     def __init__(self, store):
         self.store = store
@@ -1444,7 +1508,9 @@ class Runner:
                     args=(automation["id"],),
                     daemon=True,
                 ).start()
-        return self.store.get_run(item["id"])
+        saved = self.store.get_run(item["id"])
+        publish_run_started(saved)
+        return saved
 
     def cancel(self, id_):
         with self.cv:
@@ -1558,6 +1624,7 @@ class Runner:
             }
         )
         self.store.save_run(latest)
+        publish_run_finished(latest)
         print(f"run {id_} finished as {status} in {int(time.time() - started)}s", flush=True)
 
 
@@ -2008,6 +2075,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/review":
                 runs = [run for run in STORE.list_runs(limit=200) if run["finishedAt"] and not run["reviewedAt"]]
                 return self.json(200, {"runs": runs})
+            if path == "/api/events":
+                return self.serve_run_events()
             self.json(404, {"error": "not found"})
         except Exception as exc:
             self.json(500, {"error": str(exc)})
@@ -2160,6 +2229,33 @@ class Handler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def serve_run_events(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        subscriber = RUN_EVENTS.subscribe()
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    event = subscriber.get(timeout=25)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                payload = json.dumps(event, separators=(",", ":")).encode("utf-8")
+                self.wfile.write(b"data: ")
+                self.wfile.write(payload)
+                self.wfile.write(b"\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            RUN_EVENTS.unsubscribe(subscriber)
 
     def json(self, status, payload, send_body=True):
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

@@ -179,3 +179,5 @@ export function formatDate(value: string | null | undefined, locale?: string): s
 export function isAutomationActive(item: Automation): boolean {
   return Boolean(item.activeRunId && ['queued', 'running', 'canceling'].includes(item.activeRunStatus ?? ''));
 }
+
+export const ACTIVE_AUTOMATION_POLL_MS = 3000;

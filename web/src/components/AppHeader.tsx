@@ -1,7 +1,8 @@
-import { Button } from '@tutti-os/ui-system';
+import { Button, Spinner } from '@tutti-os/ui-system';
 import { ChevronLeft, Pencil, Rocket, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { isAutomationActive } from '../lib/schedule';
+import { runActionLabel } from '../lib/runs';
 import { PromptPreviewText } from './PromptPreviewText';
 import type { Automation } from '../types';
 
@@ -60,10 +61,11 @@ export function AppHeader({
             type="button"
             disabled={active}
             aria-busy={active}
+            aria-label={active ? runActionLabel(inboxAutomation.activeRunStatus, t) : t('common.runNow')}
             onClick={onRun}
           >
-            <Rocket size={16} aria-hidden="true" />
-            {t('common.runNow')}
+            {active ? <Spinner size={16} /> : <Rocket size={16} aria-hidden="true" />}
+            {active ? runActionLabel(inboxAutomation.activeRunStatus, t) : t('common.runNow')}
           </Button>
         </div>
         <Button id="headerEditButton" className="primary-action" type="button" onClick={onEdit}>

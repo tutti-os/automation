@@ -871,6 +871,10 @@ body.inbox-open .app-header h1 {
   height: 15px;
 }
 
+.run-item-active {
+  border-style: dashed;
+}
+
 .empty-inbox {
   display: grid;
   min-height: 100%;

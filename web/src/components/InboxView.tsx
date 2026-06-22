@@ -3,7 +3,7 @@ import { Info } from 'lucide-react';
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import { useI18n } from '../i18n';
 import { api } from '../api';
-import { formatDate } from '../lib/schedule';
+import { formatDate, isAutomationActive } from '../lib/schedule';
 import {
   isRunActive,
   runActionLabel,
@@ -65,6 +65,8 @@ export function InboxView({
         : filter === 'fail'
           ? 'empty.wrongs'
           : 'empty.skipped';
+  const automationActive = isAutomationActive(automation);
+  const hasActiveRunCard = runs.some(isRunActive);
 
   return (
     <section className="inbox-surface" aria-label={t('aria.automationInbox')}>
@@ -96,12 +98,24 @@ export function InboxView({
             <div className="empty-inbox inbox-loading" role="status" aria-label={t('loading.runs')}>
               <Spinner size={22} />
             </div>
-          ) : runs.length === 0 ? (
-            <div className="empty-inbox">
-              <h2>{t(emptyKey)}</h2>
-            </div>
           ) : (
-            runs.map((run) => <RunCard key={run.id} run={run} onRefresh={onRefresh} />)
+            <>
+              {automationActive && !hasActiveRunCard ? (
+                <article className="run-item run-item-active" role="status" aria-live="polite">
+                  <div className="run-progress">
+                    <Spinner size={15} />
+                    <span>{runActionLabel(automation.activeRunStatus, t)}</span>
+                  </div>
+                </article>
+              ) : null}
+              {runs.length === 0 && !automationActive ? (
+                <div className="empty-inbox">
+                  <h2>{t(emptyKey)}</h2>
+                </div>
+              ) : (
+                runs.map((run) => <RunCard key={run.id} run={run} onRefresh={onRefresh} />)
+              )}
+            </>
           )}
         </div>
       </div>

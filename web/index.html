@@ -4,16 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Automation</title>
-    <script>
-      (() => {
-        const systemTheme = window.matchMedia?.('(prefers-color-scheme: dark)').matches
-          ? 'dark'
-          : 'light';
-        document.documentElement.dataset.theme = systemTheme;
-        document.documentElement.dataset.themeSource = 'system';
-        document.documentElement.style.colorScheme = systemTheme;
-      })();
-    </script>
   </head>
   <body>
     <div id="root"></div>

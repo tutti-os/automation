@@ -19,6 +19,7 @@ import type {
 } from './types';
 import type { TemplateDefinition } from './lib/templates';
 import { templateScheduleDraft } from './lib/templates';
+import { runMatchesInboxFilter } from './lib/runs';
 import {
   ACTIVE_AUTOMATION_POLL_MS,
   defaultScheduleDraft,
@@ -66,10 +67,7 @@ export function App() {
   );
 
   const filteredRuns = useMemo(() => {
-    if (inboxFilter === 'all') return state.runs;
-    if (inboxFilter === 'success') return state.runs.filter((run) => run.taskStatus === 'success');
-    if (inboxFilter === 'fail') return state.runs.filter((run) => run.taskStatus === 'fail');
-    return state.runs.filter((run) => run.taskStatus === 'skip');
+    return state.runs.filter((run) => runMatchesInboxFilter(run, inboxFilter));
   }, [inboxFilter, state.runs]);
 
   const loadContextOptions = useCallback(async () => {

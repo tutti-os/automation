@@ -70,6 +70,7 @@
   "request.failed": "Request failed",
   "result.empty": "No result captured.",
   "run.refreshFailed": "Automation task refresh failed",
+  "run.status.canceled": "Canceled",
   "run.status.canceling": "Canceling",
   "run.status.fail": "Failed",
   "run.status.queued": "Queued",

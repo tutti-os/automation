@@ -288,8 +288,6 @@ body.inbox-open .app-header h1 {
 
 .primary-action,
 .create-submit {
-  background: var(--text-primary);
-  color: var(--text-inverted);
   font-size: 14px;
   line-height: 20px;
 }
@@ -298,11 +296,6 @@ body.inbox-open .app-header h1 {
 .app-shell .create-submit[data-slot='button'] {
   font-size: 14px;
   line-height: 20px;
-}
-
-.primary-action:hover,
-.create-submit:hover {
-  background: var(--text-primary-hover);
 }
 
 .primary-action:active,

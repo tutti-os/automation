@@ -70,6 +70,7 @@
   "request.failed": "请求失败",
   "result.empty": "暂无结果。",
   "run.refreshFailed": "自动化任务刷新失败",
+  "run.status.canceled": "已取消",
   "run.status.canceling": "取消中",
   "run.status.fail": "失败",
   "run.status.queued": "排队中",

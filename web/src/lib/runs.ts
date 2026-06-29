@@ -1,4 +1,4 @@
-import type { AutomationRun } from '../types';
+import type { AutomationRun, InboxFilter } from '../types';
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'canceling']);
 
@@ -27,6 +27,13 @@ export function normalizedResultStatus(run: AutomationRun): string {
 
 export function runStatusClass(run: AutomationRun): string {
   return normalizedResultStatus(run).replaceAll('_', '-');
+}
+
+export function runMatchesInboxFilter(run: AutomationRun, filter: InboxFilter): boolean {
+  if (filter === 'all') return true;
+  const status = normalizedResultStatus(run);
+  if (filter === 'fail') return status === 'fail' || status === 'canceled';
+  return status === filter;
 }
 
 export function runStatusLabel(

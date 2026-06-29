@@ -14,8 +14,8 @@ importers:
         specifier: 0.0.13
         version: 0.0.13(@floating-ui/dom@1.7.6)(@tiptap/pm@3.27.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tutti-os/ui-system':
-        specifier: 0.0.13
-        version: 0.0.13(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        specifier: 0.0.39
+        version: 0.0.39(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tutti-os/workspace-external-core':
         specifier: 0.0.13
         version: 0.0.13(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(valtio@2.3.2(@types/react@19.2.17)(react@19.2.7))
@@ -1072,6 +1072,13 @@ packages:
 
   '@tutti-os/ui-system@0.0.13':
     resolution: {integrity: sha512-jDKw/peTAf5TWOkJAJuXzU7AxZdcRtZFBPATugPlQ6J8Jrc5qWWkDROyTDKds1BC6a4lKbI1xUEX3cv5kgQcZA==}
+    hasBin: true
+    peerDependencies:
+      react: ^19.1.0
+      react-dom: ^19.1.0
+
+  '@tutti-os/ui-system@0.0.39':
+    resolution: {integrity: sha512-Y1NPJn/OGm1ai8ovwtRjpuoNGT1421u3bG5EYRmI1wkkRjpt0PDO5S0jGmwyFJouUVTwVp0LHTavf1W1l7tY2A==}
     hasBin: true
     peerDependencies:
       react: ^19.1.0
@@ -2877,6 +2884,26 @@ snapshots:
       - utf-8-validate
 
   '@tutti-os/ui-system@0.0.13(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+    dependencies:
+      '@fontsource-variable/lexend': 5.2.11
+      class-variance-authority: 0.7.1
+      clsx: 2.1.1
+      radix-ui: 1.6.0(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      react: 19.2.7
+      react-dom: 19.2.7(react@19.2.7)
+      react-resizable-panels: 4.11.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      sonner: 2.0.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      tailwind-merge: 3.6.0
+      tw-animate-css: 1.4.0
+      vaul: 1.1.2(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      ws: 8.21.0
+    transitivePeerDependencies:
+      - '@types/react'
+      - '@types/react-dom'
+      - bufferutil
+      - utf-8-validate
+
+  '@tutti-os/ui-system@0.0.39(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@fontsource-variable/lexend': 5.2.11
       class-variance-authority: 0.7.1

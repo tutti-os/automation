@@ -2,6 +2,7 @@
   "name": "automation",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.32.1",
   "scripts": {
     "build:web": "pnpm --filter @automation/web build",
     "dev": "pnpm --filter @automation/web dev",

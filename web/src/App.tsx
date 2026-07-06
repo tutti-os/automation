@@ -26,7 +26,7 @@ import {
   isAutomationActive,
   scheduleDraftFromAutomation,
 } from './lib/schedule';
-import { reportUserActive } from './lib/tuttiActivity';
+import { handleAutomationEventMessage } from './lib/automationEvents';
 
 type LoadState = {
   automations: Automation[];
@@ -172,7 +172,7 @@ export function App() {
     };
 
     const source = new EventSource('/api/events');
-    source.onmessage = refresh;
+    source.onmessage = (event) => handleAutomationEventMessage(event, refresh);
 
     return () => {
       source.close();
@@ -216,7 +216,6 @@ export function App() {
         });
       } else {
         await api('/api/automations', { method: 'POST', body: JSON.stringify(payload) });
-        reportUserActive();
       }
       setConfigOpen(false);
       setEditingAutomation(null);

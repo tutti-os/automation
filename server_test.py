@@ -51,8 +51,6 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     "composer-options",
                     "--provider",
                     "codex",
-                    "--include-capability-catalog",
-                    "false",
                     "--locale",
                     "zh-CN",
                 ]:
@@ -119,8 +117,6 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     "composer-options",
                     "--provider",
                     "codex",
-                    "--include-capability-catalog",
-                    "false",
                     "--locale",
                     "zh-CN",
                 ],

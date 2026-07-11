@@ -1334,8 +1334,6 @@ def agent_composer_options_payload(provider, locale=None):
         "composer-options",
         "--provider",
         provider,
-        "--include-capability-catalog",
-        "false",
     ]
     workspace_root = clean_optional_string(WORKSPACE_ROOT)
     if workspace_root:

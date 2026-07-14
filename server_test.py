@@ -1455,7 +1455,7 @@ class SchedulerTest(unittest.TestCase):
                     }
                 )
             )
-            stale = dict(automation)
+            stale = scheduler_snapshot(module, automation)
             edited = {**automation, "name": "After", "updatedAt": module.now_iso()}
             module.STORE.save_automation(edited)
 
@@ -1489,16 +1489,55 @@ class SchedulerTest(unittest.TestCase):
                     }
                 )
             )
+            stale = scheduler_snapshot(module, automation)
             module.STORE.delete_automation(automation["id"])
 
             advanced = module.STORE.advance_automation_schedule(
-                automation,
+                stale,
                 module.now_iso(),
                 automation["nextRunAt"],
             )
 
             self.assertFalse(advanced)
             self.assertIsNone(module.STORE.get_automation(automation["id"]))
+
+    def test_schedule_advance_uses_raw_legacy_runner_settings_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            now = module.datetime(2026, 1, 1, 3, 0, 0, tzinfo=module.timezone.utc)
+            automation = module.STORE.save_automation(
+                module.normalize_automation(
+                    {
+                        "name": "Legacy provider task",
+                        "prompt": "Review",
+                        "cwd": str(Path.cwd()),
+                        "enabled": True,
+                        "scheduleType": "interval",
+                        "schedule": {"intervalMinutes": 15},
+                        "concurrency": "queue",
+                        "runnerSettings": {"agentTargetId": "local:reviewer"},
+                        "runnerArgs": [],
+                        "env": {},
+                    }
+                )
+            )
+            due_at = (now - module.timedelta(minutes=1)).isoformat()
+            with module.STORE.lock:
+                module.STORE.db.execute(
+                    "UPDATE automations SET runner_settings_json=?, next_run_at=? WHERE id=?",
+                    ('{"provider":"codex"}', due_at, automation["id"]),
+                )
+                module.STORE.db.commit()
+            due = module.STORE.list_due_automations()[0]
+
+            advanced = module.STORE.advance_automation_schedule(
+                due,
+                module.now_iso(),
+                module.compute_next_run(due, now),
+            )
+
+            self.assertTrue(advanced)
+            self.assertNotEqual(module.STORE.get_automation(automation["id"])["nextRunAt"], due_at)
 
 
 class FakeSchedulerStore:
@@ -1517,6 +1556,15 @@ class FakeSchedulerStore:
         saved = {**automation, "updatedAt": updated_at, "nextRunAt": next_run_at}
         self.saved.append(saved)
         return automation
+
+
+def scheduler_snapshot(module, automation):
+    with module.STORE.lock:
+        row = module.STORE.db.execute(
+            "SELECT * FROM automations WHERE id=?",
+            (automation["id"],),
+        ).fetchone()
+    return {**automation, "_schedulerSnapshot": module.scheduler_row_snapshot(row)}
 
 
 class FakeRunner:

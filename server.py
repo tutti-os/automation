@@ -273,6 +273,9 @@ class Store:
 
     def advance_automation_schedule(self, snapshot, updated_at, next_run_at):
         """Advance only the unchanged row observed by the scheduler scan."""
+        raw = snapshot.get("_schedulerSnapshot")
+        if not isinstance(raw, dict):
+            raise ValueError("automation is missing its scheduler snapshot")
         with self.lock:
             result = self.db.execute(
                 """
@@ -296,20 +299,20 @@ class Store:
                 (
                     updated_at,
                     next_run_at,
-                    snapshot["id"],
-                    snapshot["name"],
-                    snapshot["prompt"],
-                    snapshot["cwd"],
-                    1 if snapshot["enabled"] else 0,
-                    snapshot["scheduleType"],
-                    json.dumps(snapshot["schedule"], separators=(",", ":")),
-                    snapshot["concurrency"],
-                    json.dumps(snapshot["runnerSettings"], separators=(",", ":")),
-                    json.dumps(snapshot["runnerArgs"], separators=(",", ":")),
-                    json.dumps(snapshot["env"], separators=(",", ":")),
-                    snapshot["createdAt"],
-                    snapshot["updatedAt"],
-                    snapshot.get("nextRunAt"),
+                    raw["id"],
+                    raw["name"],
+                    raw["prompt"],
+                    raw["cwd"],
+                    raw["enabled"],
+                    raw["schedule_type"],
+                    raw["schedule_json"],
+                    raw["concurrency"],
+                    raw["runner_settings_json"],
+                    raw["runner_args_json"],
+                    raw["env_json"],
+                    raw["created_at"],
+                    raw["updated_at"],
+                    raw["next_run_at"],
                 ),
             )
             self.db.commit()
@@ -340,7 +343,13 @@ class Store:
                 """,
                 (now_iso(),),
             ).fetchall()
-            return [decode_automation(row) for row in rows]
+            return [
+                {
+                    **decode_automation(row),
+                    "_schedulerSnapshot": scheduler_row_snapshot(row),
+                }
+                for row in rows
+            ]
 
     def next_scheduled_run_at(self):
         with self.lock:
@@ -500,6 +509,28 @@ def decode_automation(row):
         "activeRunStatus": row_get(row, "active_run_status"),
         "unreviewedRunCount": row_get(row, "unreviewed_run_count", 0),
         "unreviewedFailedRunCount": row_get(row, "unreviewed_failed_run_count", 0),
+    }
+
+
+def scheduler_row_snapshot(row):
+    return {
+        key: row[key]
+        for key in (
+            "id",
+            "name",
+            "prompt",
+            "cwd",
+            "enabled",
+            "schedule_type",
+            "schedule_json",
+            "concurrency",
+            "runner_settings_json",
+            "runner_args_json",
+            "env_json",
+            "created_at",
+            "updated_at",
+            "next_run_at",
+        )
     }
 
 

@@ -6,6 +6,10 @@ export type ScheduleDraft = {
 };
 
 export type RunnerSettings = {
+  agentTargetId?: string;
+  /** Runtime metadata for the selected Agent Target. */
+  providerId?: string;
+  /** @deprecated Provider compatibility input for old saved tasks. */
   provider?: string;
   model?: string;
   reasoningEffort?: string;
@@ -50,6 +54,7 @@ export type AutomationRun = {
   taskStatus: string | null;
   artifactDir: string;
   agentSessionId?: string | null;
+  agentTargetId?: string | null;
   agentProvider?: string | null;
   reviewedAt: string | null;
 };
@@ -85,12 +90,22 @@ export type RunnerModel = {
   permissionModes?: Array<{ id: string; label?: string }>;
 };
 
-export type RunnerProvider = {
+export type RunnerAgentTarget = {
+  agentTargetId: string;
+  providerId: string;
+  displayName?: string;
   id?: string;
+  /** @deprecated Compatibility projection. */
   provider?: string;
   label?: string;
   name?: string;
   status?: string;
+};
+
+export type LegacyRunnerProvider = {
+  provider: string;
+  status?: string;
+  detail?: string;
 };
 
 export type RunnerPermissionMode = {
@@ -104,6 +119,11 @@ export type RunnerPermissionMode = {
 
 export type RunnerOptions = {
   available: boolean;
+  agentTargetId?: string;
+  providerId?: string;
+  defaultAgentTargetId?: string;
+  agents?: RunnerAgentTarget[];
+  /** @deprecated Compatibility projection. */
   provider?: string;
   defaultProvider?: string;
   currentModel?: string;
@@ -111,7 +131,7 @@ export type RunnerOptions = {
   optionsUnavailable?: boolean;
   permissionMode?: string;
   models?: RunnerModel[];
-  providers?: RunnerProvider[];
+  providers?: LegacyRunnerProvider[];
   permissionConfig?: {
     configurable?: boolean;
     defaultValue?: string;

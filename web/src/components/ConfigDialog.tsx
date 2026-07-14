@@ -29,7 +29,7 @@ import type {
   RunnerModel,
   RunnerOptions,
   RunnerPermissionMode,
-  RunnerProvider,
+  RunnerAgentTarget,
   RunnerReasoningLevel,
 } from '../types';
 
@@ -71,16 +71,16 @@ export function ConfigDialog({
   const [name, setName] = useState(automation?.name ?? (initialTemplate ? t(initialTemplate.nameKey) : ''));
   const [prompt, setPrompt] = useState(automation?.prompt ?? (initialTemplate ? t(initialTemplate.promptKey) : ''));
   const [cwd, setCwd] = useState(automation?.cwd ?? context?.workspaceRoot ?? '');
-  const [provider, setProvider] = useState(initialRunnerSelection.provider);
+  const [agentTargetId, setAgentTargetId] = useState(initialRunnerSelection.agentTargetId);
   const [model, setModel] = useState(initialRunnerSelection.model);
   const [reasoningEffort, setReasoningEffort] = useState(initialRunnerSelection.reasoningEffort);
   const [permissionMode, setPermissionMode] = useState(initialRunnerSelection.permissionMode);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [cwdCustomMode, setCwdCustomMode] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [isLoadingProviderOptions, setIsLoadingProviderOptions] = useState(false);
+  const [isLoadingAgentOptions, setIsLoadingAgentOptions] = useState(false);
   const customCwdInputRef = useRef<HTMLInputElement>(null);
-  const isRunnerOptionsLoading = isLoadingRunnerOptions || isLoadingProviderOptions;
+  const isRunnerOptionsLoading = isLoadingRunnerOptions || isLoadingAgentOptions;
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -93,18 +93,18 @@ export function ConfigDialog({
   useEffect(() => {
     const nextRunnerSelection = resolveRunnerSelection(automation, runnerOptions);
     const nextCwd = automation?.cwd ?? context?.workspaceRoot ?? '';
-    const preferredProvider = normalizeText(automation?.runnerSettings?.provider);
-    const globalProvider = normalizeText(runnerOptions.provider);
-    const providerCatalogMatches =
-      !preferredProvider || preferredProvider === globalProvider;
-    if (providerCatalogMatches) {
+    const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+    const globalAgentTargetId = normalizeText(runnerOptions.agentTargetId);
+    const agentCatalogMatches =
+      !preferredAgentTargetId || preferredAgentTargetId === globalAgentTargetId;
+    if (agentCatalogMatches) {
       setDialogRunnerOptions(runnerOptions);
     }
     setName(automation?.name ?? (initialTemplate ? t(initialTemplate.nameKey) : ''));
     setPrompt(automation?.prompt ?? (initialTemplate ? t(initialTemplate.promptKey) : ''));
     setCwd(nextCwd);
     setCwdCustomMode(!isKnownCwdPath(nextCwd, cwdOptions));
-    setProvider(nextRunnerSelection.provider);
+    setAgentTargetId(nextRunnerSelection.agentTargetId);
     setModel(nextRunnerSelection.model);
     setReasoningEffort(nextRunnerSelection.reasoningEffort);
     setPermissionMode(nextRunnerSelection.permissionMode);
@@ -113,20 +113,20 @@ export function ConfigDialog({
   }, [automation, context, cwdOptions, initialTemplate, runnerOptions, t]);
 
   useEffect(() => {
-    const preferredProvider = normalizeText(automation?.runnerSettings?.provider);
-    if (!preferredProvider) return;
-    if (normalizeText(provider) !== preferredProvider) return;
-    const loadedProvider = normalizeText(dialogRunnerOptions.provider);
-    if (loadedProvider === preferredProvider && dialogRunnerOptions.available) return;
+    const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+    if (!preferredAgentTargetId) return;
+    if (normalizeText(agentTargetId) !== preferredAgentTargetId) return;
+    const loadedAgentTargetId = normalizeText(dialogRunnerOptions.agentTargetId);
+    if (loadedAgentTargetId === preferredAgentTargetId && dialogRunnerOptions.available) return;
 
     let cancelled = false;
-    setIsLoadingProviderOptions(true);
-    void fetchRunnerOptions(preferredProvider, locale)
+    setIsLoadingAgentOptions(true);
+    void fetchRunnerOptions(preferredAgentTargetId, locale)
       .then((nextOptions) => {
         if (cancelled) return;
         const nextSelection = resolveRunnerSelection(automation, nextOptions);
         setDialogRunnerOptions(nextOptions);
-        setProvider(nextSelection.provider);
+        setAgentTargetId(nextSelection.agentTargetId);
         setModel(nextSelection.model);
         setReasoningEffort(nextSelection.reasoningEffort);
         setPermissionMode(nextSelection.permissionMode);
@@ -136,22 +136,25 @@ export function ConfigDialog({
         setFormError(t('request.failed'));
       })
       .finally(() => {
-        if (!cancelled) setIsLoadingProviderOptions(false);
+        if (!cancelled) setIsLoadingAgentOptions(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [automation, dialogRunnerOptions.available, dialogRunnerOptions.provider, locale, provider, t]);
+  }, [automation, agentTargetId, dialogRunnerOptions.agentTargetId, dialogRunnerOptions.available, locale, runnerOptions, t]);
 
   const scheduleLabel = useMemo(
     () => scheduleLabelFromDraft(scheduleDraft, t, locale),
     [locale, scheduleDraft, t],
   );
-  const providerOptions = useMemo(() => runnerProviders(dialogRunnerOptions), [dialogRunnerOptions]);
-  const selectedProvider = useMemo(
-    () => providerOptions.find((item) => runnerProviderId(item) === provider) ?? providerOptions[0] ?? null,
-    [provider, providerOptions],
+  const agentTargetOptions = useMemo(
+    () => availableRunnerAgentTargets(dialogRunnerOptions),
+    [dialogRunnerOptions],
+  );
+  const selectedAgentTarget = useMemo(
+    () => agentTargetOptions.find((item) => runnerAgentTargetId(item) === agentTargetId) ?? null,
+    [agentTargetId, agentTargetOptions],
   );
   const modelOptions = dialogRunnerOptions.models ?? [];
   const selectedModel = useMemo(() => {
@@ -174,7 +177,7 @@ export function ConfigDialog({
 
   useEffect(() => {
     if (!dialogRunnerOptions.available || isRunnerOptionsLoading) return;
-    if (normalizeText(dialogRunnerOptions.provider) !== normalizeText(provider)) return;
+    if (normalizeText(dialogRunnerOptions.agentTargetId) !== normalizeText(agentTargetId)) return;
 
     const matchedModel = modelOptions.find((item) => item.id === model);
     if (!matchedModel) {
@@ -194,12 +197,12 @@ export function ConfigDialog({
   }, [
     dialogRunnerOptions.available,
     dialogRunnerOptions.currentModel,
-    dialogRunnerOptions.provider,
+    dialogRunnerOptions.agentTargetId,
     isRunnerOptionsLoading,
     model,
     modelOptions,
     permissionMode,
-    provider,
+    agentTargetId,
     reasoningEffort,
     selectedPermission,
     selectedReasoning,
@@ -211,50 +214,50 @@ export function ConfigDialog({
     onScheduleDraftChange(templateScheduleDraft(template));
   };
 
-  const selectProvider = async (nextProvider: string) => {
-    if (nextProvider === provider) return;
-    const previousProvider = provider;
-    setProvider(nextProvider);
+  const selectAgentTarget = async (nextAgentTargetId: string) => {
+    if (nextAgentTargetId === agentTargetId) return;
+    const previousAgentTargetId = agentTargetId;
+    setAgentTargetId(nextAgentTargetId);
     setModel('');
     setReasoningEffort('');
     setPermissionMode('');
     setFormError(null);
-    if (!nextProvider) return;
-    setIsLoadingProviderOptions(true);
+    if (!nextAgentTargetId) return;
+    setIsLoadingAgentOptions(true);
     try {
-      const nextOptions = await fetchRunnerOptions(nextProvider, locale);
+      const nextOptions = await fetchRunnerOptions(nextAgentTargetId, locale);
       const nextSelection = resolveRunnerSelection(
         {
           runnerSettings: {
-            provider: nextProvider,
+            agentTargetId: nextAgentTargetId,
           },
           runnerArgs: [],
         },
         nextOptions,
       );
       setDialogRunnerOptions(nextOptions);
-      setProvider(nextSelection.provider);
+      setAgentTargetId(nextSelection.agentTargetId);
       setModel(nextSelection.model);
       setReasoningEffort(nextSelection.reasoningEffort);
       setPermissionMode(nextSelection.permissionMode);
     } catch {
       setFormError(t('request.failed'));
-      setProvider(previousProvider);
+      setAgentTargetId(previousAgentTargetId);
     } finally {
-      setIsLoadingProviderOptions(false);
+      setIsLoadingAgentOptions(false);
     }
   };
 
   const runnerSelectionReady = isRunnerSelectionReady(
     dialogRunnerOptions,
-    provider,
+    agentTargetId,
     model,
     isRunnerOptionsLoading,
   );
   const modelsUnavailable =
     !isRunnerOptionsLoading &&
     dialogRunnerOptions.available &&
-    providerRequiresModel(provider) &&
+    agentTargetRequiresModel(agentTargetId) &&
     modelOptions.length === 0 &&
     !normalizeText(dialogRunnerOptions.currentModel);
   const runnerOptionsDegraded =
@@ -285,6 +288,10 @@ export function ConfigDialog({
       setFormError(t('form.runnerOptionsDegraded'));
       return;
     }
+    if (!normalizeText(agentTargetId)) {
+      setFormError(t('form.agentRequired'));
+      return;
+    }
     if (!runnerSelectionReady) {
       setFormError(t('form.modelRequired'));
       return;
@@ -308,7 +315,7 @@ export function ConfigDialog({
       schedule: scheduleConfig.schedule,
       concurrency: 'queue',
       runnerSettings: {
-        provider,
+        agentTargetId,
         model: model || undefined,
         reasoningEffort: reasoningEffort || undefined,
         permissionMode: permissionMode || undefined,
@@ -530,14 +537,14 @@ export function ConfigDialog({
                   <div className="runner-options">
                     <RunnerSelectMenu
                       className="runner-select-tool"
-                      label={providerLabel(selectedProvider)}
-                      title={t('form.provider')}
-                      value={provider}
-                      options={providerOptions.map((item) => ({
-                        value: runnerProviderId(item),
-                        label: providerLabel(item),
+                      label={agentTargetLabel(selectedAgentTarget) || t('form.agentRequired')}
+                      title={t('form.agent')}
+                      value={agentTargetId}
+                      options={agentTargetOptions.map((item) => ({
+                        value: runnerAgentTargetId(item),
+                        label: agentTargetLabel(item),
                       }))}
-                      onValueChange={(value) => void selectProvider(value)}
+                      onValueChange={(value) => void selectAgentTarget(value)}
                     />
 
                     {modelOptions.length > 0 ? (
@@ -559,7 +566,7 @@ export function ConfigDialog({
                           );
                         }}
                       />
-                    ) : providerRequiresModel(provider) && dialogRunnerOptions.currentModel ? (
+                    ) : agentTargetRequiresModel(agentTargetId) && dialogRunnerOptions.currentModel ? (
                       <RunnerSelectMenu
                         className="runner-select-tool"
                         label={modelLabel({ id: model || dialogRunnerOptions.currentModel || '' }, t)}
@@ -648,26 +655,26 @@ export function ConfigDialog({
   );
 }
 
-function providerRequiresModel(provider: string): boolean {
-  void provider;
+function agentTargetRequiresModel(agentTargetId: string): boolean {
+  void agentTargetId;
   return false;
 }
 
-function providerAllowsDefaultModel(provider: string): boolean {
-  return Boolean(normalizeText(provider));
+function agentTargetAllowsDefaultModel(agentTargetId: string): boolean {
+  return Boolean(normalizeText(agentTargetId));
 }
 
 function isRunnerSelectionReady(
   runnerOptions: RunnerOptions,
-  provider: string,
+  agentTargetId: string,
   model: string,
   isLoading: boolean,
 ): boolean {
   if (isLoading || !runnerOptions.available) return false;
   if (runnerOptions.optionsUnavailable) return false;
-  if (normalizeText(runnerOptions.provider) !== normalizeText(provider)) return false;
-  if (providerAllowsDefaultModel(provider) && !normalizeText(model)) return true;
-  if (!providerRequiresModel(provider)) return true;
+  if (normalizeText(runnerOptions.agentTargetId) !== normalizeText(agentTargetId)) return false;
+  if (agentTargetAllowsDefaultModel(agentTargetId) && !normalizeText(model)) return true;
+  if (!agentTargetRequiresModel(agentTargetId)) return true;
   const normalizedModel = normalizeText(model);
   if (!normalizedModel) return false;
   const modelOptions = runnerOptions.models ?? [];
@@ -685,16 +692,16 @@ function resolveRunnerSelection(
   runnerOptions: RunnerOptions,
 ) {
   const parsed = parseRunnerArgs(automation?.runnerArgs ?? []);
-  const providers = runnerProviders(runnerOptions);
-  const preferredProvider = normalizeText(automation?.runnerSettings?.provider);
-  const provider =
-    providers.find((item) => runnerProviderId(item) === preferredProvider) ?
-      preferredProvider :
-      normalizeText(runnerOptions.provider) ||
-      normalizeText(runnerOptions.defaultProvider) ||
-      runnerProviderId(providers[0]) ||
-      preferredProvider ||
-      'codex';
+  const agents = runnerAgentTargets(runnerOptions);
+  const configuredAgentTargetId = normalizeText(automation?.runnerSettings?.agentTargetId);
+  const configuredLegacyProvider = normalizeText(automation?.runnerSettings?.provider);
+  const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+  const agentTargetId =
+    preferredAgentTargetId ||
+    (configuredAgentTargetId || configuredLegacyProvider ? '' :
+      normalizeText(runnerOptions.agentTargetId) ||
+      normalizeText(runnerOptions.defaultAgentTargetId) ||
+      runnerAgentTargetId(agents[0]));
   const model = normalizeText(automation?.runnerSettings?.model) || parsed.model || runnerOptions.currentModel || runnerOptions.models?.[0]?.id || '';
   const selectedModel = runnerOptions.models?.find((item) => item.id === model) ?? runnerOptions.models?.[0] ?? null;
   const reasoningEffort =
@@ -712,7 +719,7 @@ function resolveRunnerSelection(
     runnerOptions.permissionConfig?.modes?.[0]?.id ||
     '';
   return {
-    provider,
+    agentTargetId,
     model,
     reasoningEffort,
     permissionMode,
@@ -760,23 +767,44 @@ function readReasoningConfig(value: string, result: { reasoningEffort: string })
   if (match) result.reasoningEffort = (match[1] ?? '').replace(/^["']|["']$/g, '');
 }
 
-function runnerProviders(runnerOptions: RunnerOptions): RunnerProvider[] {
-  const providers = runnerOptions.providers ?? [];
-  return providers.length > 0 ? providers : [{ provider: runnerOptions.provider || 'codex' }];
+function runnerAgentTargets(runnerOptions: RunnerOptions): RunnerAgentTarget[] {
+  return runnerOptions.agents ?? [];
 }
 
-function runnerProviderId(provider?: RunnerProvider | null): string {
-  return normalizeText(provider?.provider) || normalizeText(provider?.id);
+function availableRunnerAgentTargets(runnerOptions: RunnerOptions): RunnerAgentTarget[] {
+  return runnerAgentTargets(runnerOptions).filter((agent) => {
+    const status = normalizeText(agent.status).toLowerCase();
+    return !status || status === 'available' || status === 'ready';
+  });
+}
+
+function automationAgentTargetId(
+  automation: Pick<Automation, 'runnerSettings'> | null | undefined,
+  runnerOptions: RunnerOptions,
+): string {
+  const exact = normalizeText(automation?.runnerSettings?.agentTargetId);
+  if (exact) return exact;
+  const legacyProvider = normalizeText(automation?.runnerSettings?.provider);
+  if (!legacyProvider) return '';
+  const matches = runnerAgentTargets(runnerOptions).filter(
+    (item) => normalizeText(item.providerId) === legacyProvider,
+  );
+  return matches.length === 1 ? runnerAgentTargetId(matches[0]) : '';
+}
+
+function runnerAgentTargetId(agent?: RunnerAgentTarget | null): string {
+  return normalizeText(agent?.agentTargetId);
 }
 
 function runnerReasoningId(reasoning?: RunnerReasoningLevel | null): string {
   return normalizeText(reasoning?.effort) || normalizeText(reasoning?.value) || normalizeText(reasoning?.id);
 }
 
-function providerLabel(provider?: RunnerProvider | null): string {
-  const explicit = normalizeText(provider?.label) || normalizeText(provider?.name);
+function agentTargetLabel(agent?: RunnerAgentTarget | null): string {
+  const explicit =
+    normalizeText(agent?.displayName) || normalizeText(agent?.label) || normalizeText(agent?.name);
   if (explicit) return explicit;
-  return titleize(runnerProviderId(provider) || 'codex');
+  return runnerAgentTargetId(agent);
 }
 
 function modelLabel(model: RunnerModel | null | undefined, t: (key: string) => string): string {

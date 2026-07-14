@@ -2,7 +2,7 @@ import { StatusDot } from '@tutti-os/ui-system';
 import { useEffect, useMemo, useState, type MouseEvent, type RefObject } from 'react';
 import { useI18n } from '../i18n';
 import { runnerDetailsFromSettings } from '../lib/runnerDetails';
-import { fetchRunnerOptions, runnerOptionsMatchProvider } from '../lib/runnerOptionsApi';
+import { fetchRunnerOptions, runnerOptionsMatchAgentTarget } from '../lib/runnerOptionsApi';
 import { automationScheduleLabel, formatDate } from '../lib/schedule';
 import type { Automation, RunnerOptions } from '../types';
 
@@ -20,17 +20,23 @@ export function AutomationStatusSection({
   onSectionClick,
 }: AutomationStatusSectionProps) {
   const { t, locale } = useI18n();
-  const preferredProvider = String(automation.runnerSettings?.provider ?? '').trim();
+  const preferredAgentTargetId = useMemo(
+    () => resolveAutomationAgentTargetId(automation, runnerOptions),
+    [automation, runnerOptions],
+  );
   const [statusRunnerOptions, setStatusRunnerOptions] = useState(runnerOptions);
 
   useEffect(() => {
-    if (!preferredProvider || runnerOptionsMatchProvider(runnerOptions, preferredProvider)) {
+    if (
+      !preferredAgentTargetId ||
+      runnerOptionsMatchAgentTarget(runnerOptions, preferredAgentTargetId)
+    ) {
       setStatusRunnerOptions(runnerOptions);
       return;
     }
 
     let cancelled = false;
-    void fetchRunnerOptions(preferredProvider, locale)
+    void fetchRunnerOptions(preferredAgentTargetId, locale)
       .then((options) => {
         if (!cancelled) setStatusRunnerOptions(options);
       })
@@ -41,7 +47,7 @@ export function AutomationStatusSection({
     return () => {
       cancelled = true;
     };
-  }, [automation.id, locale, preferredProvider, runnerOptions]);
+  }, [automation.id, locale, preferredAgentTargetId, runnerOptions]);
 
   const runnerDetails = useMemo(
     () => runnerDetailsFromSettings(automation, statusRunnerOptions, t),
@@ -76,8 +82,8 @@ export function AutomationStatusSection({
           <strong>{automation.lastRunAt ? formatDate(automation.lastRunAt, locale) : t('status.never')}</strong>
         </div>
         <div>
-          <span>{t('form.provider')}</span>
-          <strong>{runnerDetails.provider}</strong>
+          <span>{t('form.agent')}</span>
+          <strong>{runnerDetails.agent}</strong>
         </div>
         <div>
           <span>{t('form.model')}</span>
@@ -94,4 +100,18 @@ export function AutomationStatusSection({
       </div>
     </aside>
   );
+}
+
+function resolveAutomationAgentTargetId(
+  automation: Automation,
+  runnerOptions: RunnerOptions,
+): string {
+  const exact = String(automation.runnerSettings?.agentTargetId ?? '').trim();
+  if (exact) return exact;
+  const legacyProvider = String(automation.runnerSettings?.provider ?? '').trim();
+  if (!legacyProvider) return '';
+  const matches = (runnerOptions.agents ?? []).filter(
+    (item) => String(item.providerId ?? '').trim() === legacyProvider,
+  );
+  return matches.length === 1 ? String(matches[0]?.agentTargetId ?? '').trim() : '';
 }

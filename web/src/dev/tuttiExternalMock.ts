@@ -71,44 +71,44 @@ const fixtureItems: readonly AutomationTuttiExternalAtQueryResult[] = [
   },
   {
     providerId: 'agent-target',
-    itemId: 'codex',
-    label: 'Codex',
+    itemId: 'local:primary',
+    label: 'Primary Agent',
     subtitle: 'Agent target',
     insert: {
       kind: 'mention',
       mention: {
-        entityId: 'codex',
-        label: 'Codex',
+        entityId: 'local:primary',
+        label: 'Primary Agent',
         scope: {
           workspaceId: devWorkspaceId,
-          providerId: 'codex',
+          providerId: 'local-runtime',
         },
         presentation: {
-          agentProviderId: 'codex',
+          agentProviderId: 'local-runtime',
           subtitle: 'Agent target',
-          description: 'Start a Codex agent session',
+          description: 'Start the primary Agent session',
         },
       },
     },
   },
   {
     providerId: 'agent-target',
-    itemId: 'claude-code',
-    label: 'Claude Code',
+    itemId: 'local:reviewer',
+    label: 'Review Agent',
     subtitle: 'Agent target',
     insert: {
       kind: 'mention',
       mention: {
-        entityId: 'claude-code',
-        label: 'Claude Code',
+        entityId: 'local:reviewer',
+        label: 'Review Agent',
         scope: {
           workspaceId: devWorkspaceId,
-          providerId: 'claude-code',
+          providerId: 'review-runtime',
         },
         presentation: {
-          agentProviderId: 'claude-code',
+          agentProviderId: 'review-runtime',
           subtitle: 'Agent target',
-          description: 'Start a Claude Code agent session',
+          description: 'Start the review Agent session',
         },
       },
     },

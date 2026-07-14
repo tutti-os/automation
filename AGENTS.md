@@ -97,3 +97,14 @@ The frontend uses `@tutti-os/ui-system` for shared primitives (Button, Dialog, D
 When changing user-visible copy, update `web/src/i18n/messages/en.json` and `web/src/i18n/messages/zh-CN.json` together.
 
 When changing CLI commands, keep `tutti.cli.json`, `COMMANDS.md`, and the `/tutti/cli/*` handlers in `server.py` synchronized.
+
+### Agent identity
+
+Automation task definitions and runs use the exact `agentTargetId` returned by
+`tutti agent list --json` as their durable Agent identity. Provider ids are
+runtime metadata and a deprecated compatibility input only. A legacy provider
+may be resolved only when it maps to exactly one Agent Target in the full
+catalog; ambiguous mappings must fail closed. Starting and composing use
+`--agent-id`, except when an old daemon rejects exactly `agent list` and the
+legacy catalog has a unique provider mapping. Resume, summary, and open flows
+must validate that the session's `agentTargetId` matches the persisted run.

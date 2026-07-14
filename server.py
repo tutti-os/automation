@@ -122,6 +122,7 @@ class Store:
                   result_status TEXT,
                   artifact_dir TEXT NOT NULL,
                   agent_session_id TEXT,
+                  agent_target_id TEXT,
                   agent_provider TEXT,
                   reviewed_at TEXT,
                   FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
@@ -130,6 +131,7 @@ class Store:
             )
             self.ensure_column("runs", "result_status", "TEXT")
             self.ensure_column("runs", "agent_session_id", "TEXT")
+            self.ensure_column("runs", "agent_target_id", "TEXT")
             self.ensure_column("runs", "agent_provider", "TEXT")
             self.ensure_column("automations", "runner_settings_json", "TEXT NOT NULL DEFAULT '{}'")
 
@@ -336,8 +338,8 @@ class Store:
                 INSERT INTO runs (
                   id, automation_id, trigger, status, prompt, cwd, queued_at,
                   started_at, finished_at, exit_code, summary, error, result_status, artifact_dir,
-                  agent_session_id, agent_provider, reviewed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  agent_session_id, agent_target_id, agent_provider, reviewed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   status=excluded.status,
                   started_at=excluded.started_at,
@@ -348,6 +350,7 @@ class Store:
                   result_status=COALESCE(runs.result_status, excluded.result_status),
                   artifact_dir=excluded.artifact_dir,
                   agent_session_id=excluded.agent_session_id,
+                  agent_target_id=excluded.agent_target_id,
                   agent_provider=excluded.agent_provider,
                   reviewed_at=excluded.reviewed_at
                 """,
@@ -367,6 +370,7 @@ class Store:
                     item.get("taskStatus"),
                     item["artifactDir"],
                     item.get("agentSessionId"),
+                    item.get("agentTargetId"),
                     item.get("agentProvider"),
                     item.get("reviewedAt"),
                 ),
@@ -463,6 +467,7 @@ def decode_run(row):
         "taskStatus": row_get(row, "result_status"),
         "artifactDir": row["artifact_dir"],
         "agentSessionId": row_get(row, "agent_session_id"),
+        "agentTargetId": row_get(row, "agent_target_id"),
         "agentProvider": row_get(row, "agent_provider"),
         "reviewedAt": row["reviewed_at"],
     }
@@ -535,32 +540,43 @@ def normalize_automation(payload, existing=None):
 
 def validate_runner_settings_for_automation(runner_settings):
     if not isinstance(runner_settings, dict):
-        raise ValueError("provider is required for automation runner settings")
-    provider = normalize_provider_id(runner_settings.get("provider"))
-    if not provider:
-        raise ValueError("provider is required for automation runner settings")
+        raise ValueError("agentTargetId is required for automation runner settings")
+    agent_target_id = clean_agent_target_id(runner_settings.get("agentTargetId"))
+    legacy_provider = normalize_provider_id(runner_settings.get("provider"))
+    if not agent_target_id and not legacy_provider:
+        raise ValueError("agentTargetId is required for automation runner settings")
 
 
-def default_cli_runner_provider():
-    providers_payload = agent_providers_payload()
-    providers = providers_payload.get("providers") or []
-    if not providers:
+def default_cli_runner_agent_target():
+    catalog = agent_catalog_payload()
+    agent_target_id = clean_agent_target_id(catalog.get("defaultAgentTargetId"))
+    if not agent_target_id:
         raise ValueError(
-            "no available automation agent providers. Run `tutti agent providers --json` to check provider setup."
+            "no available Automation agents. Run `tutti agent list --json` to check Agent setup."
         )
-    return default_provider_from_list(providers, providers_payload.get("defaultProvider"))
+    return agent_target_id
 
 
 def normalize_runner_settings(value, existing=None, runner_args=None):
     value = value if isinstance(value, dict) else {}
     existing = existing if isinstance(existing, dict) else {}
     parsed_args = parse_runner_args(clean_string_list(runner_args or []))
-    provider = normalize_provider_id(value.get("provider") or existing.get("provider"))
+    agent_target_id = clean_agent_target_id(
+        value.get("agentTargetId") or existing.get("agentTargetId")
+    )
+    provider_id = normalize_provider_id(
+        value.get("providerId") or existing.get("providerId")
+    )
+    legacy_provider = normalize_provider_id(
+        value.get("provider") or (existing.get("provider") if not agent_target_id else None)
+    )
     model = clean_optional_string(
         value.get("model") or existing.get("model") or parsed_args.get("model")
     )
     return {
-        "provider": provider,
+        "agentTargetId": agent_target_id,
+        "providerId": provider_id,
+        **({"provider": legacy_provider} if legacy_provider and not agent_target_id else {}),
         "model": model,
         "reasoningEffort": clean_optional_string(
             value.get("reasoningEffort")
@@ -710,6 +726,10 @@ def clean_first_string(value, *keys):
 
 def clean_provider(value):
     return normalize_provider_id(value)
+
+
+def clean_agent_target_id(value):
+    return clean_optional_string(value)
 
 
 def normalize_provider_id(value):
@@ -901,11 +921,18 @@ def start_agent_session(automation, run, log_file):
         None,
         runner_args,
     )
+    agent_target_id = clean_agent_target_id(run.get("agentTargetId"))
+    provider_id = normalize_provider_id(run.get("agentProvider"))
+    if not agent_target_id or not provider_id:
+        raise RuntimeError("automation run does not contain an Agent Target snapshot")
+    cli_contract = clean_optional_string(automation.get("_agentCliContract")) or "agent-id"
+    if cli_contract not in {"agent-id", "provider-compat"}:
+        raise RuntimeError(f"unsupported Agent CLI contract: {cli_contract}")
     args = [
         "agent",
         "start",
-        "--provider",
-        settings["provider"],
+        "--agent-id" if cli_contract == "agent-id" else "--provider",
+        agent_target_id if cli_contract == "agent-id" else provider_id,
         "--cwd",
         run["cwd"],
         "--title",
@@ -926,6 +953,7 @@ def start_agent_session(automation, run, log_file):
     if settings.get("permissionMode"):
         args.extend(["--permission-mode", settings["permissionMode"]])
     duplicate_flags = {
+        "--agent-id",
         "--provider",
         "--cwd",
         "--title",
@@ -946,19 +974,86 @@ def start_agent_session(automation, run, log_file):
             duplicate_flags,
         )
     )
-    return run_tutti_cli(
+    session = run_tutti_cli(
         args,
         timeout=60,
         log_file=log_file,
     ).get("session") or {}
+    assert_session_agent_target(
+        session,
+        agent_target_id,
+        allow_provider_compat=cli_contract == "provider-compat",
+        expected_provider_id=provider_id,
+    )
+    return {
+        **session,
+        "agentTargetId": agent_target_id,
+        "provider": provider_id,
+    }
 
 
-def get_agent_session(agent_session_id, log_file=None):
-    return run_tutti_cli(
+def get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
+    session = run_tutti_cli(
         ["agent", "get", "--session-id", agent_session_id],
         timeout=30,
         log_file=log_file,
     ).get("session") or {}
+    if expected_agent_target_id:
+        assert_session_agent_target(session, expected_agent_target_id)
+    return session
+
+
+def assert_session_agent_target(
+    session,
+    expected_agent_target_id,
+    allow_provider_compat=False,
+    expected_provider_id=None,
+):
+    expected_agent_target_id = clean_agent_target_id(expected_agent_target_id)
+    actual_agent_target_id = clean_agent_target_id(session.get("agentTargetId"))
+    if actual_agent_target_id:
+        if actual_agent_target_id != expected_agent_target_id:
+            raise RuntimeError(
+                f"agent session target mismatch: expected {expected_agent_target_id}, got {actual_agent_target_id}"
+            )
+        actual_provider_id = normalize_provider_id(session.get("provider"))
+        normalized_expected_provider_id = normalize_provider_id(expected_provider_id)
+        if (
+            normalized_expected_provider_id
+            and actual_provider_id
+            and actual_provider_id != normalized_expected_provider_id
+        ):
+            raise RuntimeError(
+                f"agent session provider mismatch: expected {normalized_expected_provider_id}, got {actual_provider_id}"
+            )
+        return
+    provider_id = normalize_provider_id(session.get("provider"))
+    if allow_provider_compat and provider_id == normalize_provider_id(expected_provider_id):
+        return
+    if provider_id:
+        catalog = agent_catalog_payload()
+        if catalog.get("cliContract") == "provider-compat":
+            target = resolve_agent_target_from_catalog(
+                catalog,
+                legacy_provider=provider_id,
+            )
+            if target["agentTargetId"] == expected_agent_target_id:
+                return
+    raise RuntimeError("agent session response does not contain the expected Agent Target identity")
+
+
+def resolve_run_agent_target_id(run):
+    agent_target_id = clean_agent_target_id(run.get("agentTargetId"))
+    if agent_target_id:
+        return agent_target_id
+    legacy_provider = normalize_provider_id(run.get("agentProvider"))
+    if not legacy_provider:
+        raise ValueError("run does not have an Agent Target identity")
+    target = resolve_agent_target_from_catalog(
+        agent_catalog_payload(),
+        legacy_provider=legacy_provider,
+    )
+    return target["agentTargetId"]
 
 
 def cancel_agent_session(agent_session_id):
@@ -967,9 +1062,12 @@ def cancel_agent_session(agent_session_id):
     run_tutti_cli(["agent", "cancel", "--session-id", agent_session_id], timeout=30)
 
 
-def open_agent_session(agent_session_id, log_file=None):
+def open_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
     if not agent_session_id:
         raise ValueError("run does not have an agent session")
+    if not expected_agent_target_id:
+        raise ValueError("run does not have an Agent Target identity")
+    get_agent_session(agent_session_id, expected_agent_target_id, log_file=log_file)
     return run_tutti_cli(
         ["agent", "open", "--session-id", agent_session_id],
         timeout=30,
@@ -977,14 +1075,18 @@ def open_agent_session(agent_session_id, log_file=None):
     )
 
 
-def open_manual_agent_session_with_retries(agent_session_id, log_file):
+def open_manual_agent_session_with_retries(agent_session_id, expected_agent_target_id, log_file):
     last_error = None
     opened_once = False
     for delay_seconds in MANUAL_AGENT_OPEN_RETRY_DELAYS_SECONDS:
         if delay_seconds:
             time.sleep(delay_seconds)
         try:
-            open_agent_session(agent_session_id, log_file=log_file)
+            open_agent_session(
+                agent_session_id,
+                expected_agent_target_id,
+                log_file=log_file,
+            )
         except Exception as exc:
             last_error = exc
             continue
@@ -993,21 +1095,31 @@ def open_manual_agent_session_with_retries(agent_session_id, log_file):
         raise last_error
 
 
-def agent_session_messages(agent_session_id, log_file=None):
+def agent_session_messages(agent_session_id, expected_agent_target_id=None, log_file=None):
     result = run_tutti_cli(
         ["agent", "session-summary", "--session-id", agent_session_id, "--limit", "80"],
         timeout=30,
         log_file=log_file,
     )
+    if expected_agent_target_id:
+        assert_session_agent_target(result.get("session") or {}, expected_agent_target_id)
     return result.get("messages") or []
 
 
-def latest_agent_summary(agent_session_id, log_file=None):
-    return latest_agent_summary_from_messages(agent_session_messages(agent_session_id, log_file=log_file))
+def latest_agent_summary(agent_session_id, expected_agent_target_id=None, log_file=None):
+    return latest_agent_summary_from_messages(
+        agent_session_messages(
+            agent_session_id,
+            expected_agent_target_id,
+            log_file=log_file,
+        )
+    )
 
 
-def wait_for_final_agent_summary(agent_session_id, log_file=None):
-    summary = latest_agent_summary(agent_session_id, log_file=log_file)
+def wait_for_final_agent_summary(agent_session_id, expected_agent_target_id=None, log_file=None):
+    summary = latest_agent_summary(
+        agent_session_id, expected_agent_target_id, log_file=log_file
+    )
     if summary or FINAL_SUMMARY_GRACE_SECONDS <= 0:
         return summary
     if log_file:
@@ -1021,7 +1133,9 @@ def wait_for_final_agent_summary(agent_session_id, log_file=None):
     while time.time() < deadline:
         remaining = max(0, deadline - time.time())
         time.sleep(min(FINAL_SUMMARY_POLL_SECONDS, remaining))
-        summary = latest_agent_summary(agent_session_id, log_file=log_file)
+        summary = latest_agent_summary(
+            agent_session_id, expected_agent_target_id, log_file=log_file
+        )
         if summary:
             return summary
     return None
@@ -1238,24 +1352,32 @@ def clean_days(value):
     return days or [1]
 
 
-def runner_options_payload(provider=None, locale=None):
-    providers_payload = agent_providers_payload()
-    providers = providers_payload["providers"]
-    if not providers:
-        return empty_runner_options_payload()
-    default_provider = default_provider_from_list(
-        providers,
-        providers_payload.get("defaultProvider"),
+def runner_options_payload(agent_target_id=None, locale=None, legacy_provider=None):
+    catalog = agent_catalog_payload()
+    agents = catalog["agents"]
+    if not catalog.get("defaultAgentTargetId"):
+        payload = empty_runner_options_payload()
+        payload["agents"] = agents
+        return payload
+    target = resolve_agent_target_from_catalog(
+        catalog,
+        agent_target_id=agent_target_id,
+        legacy_provider=legacy_provider,
+        use_default=True,
+        require_available=True,
     )
-    provider = normalize_provider_id(provider) or default_provider
-    if not any(item.get("provider") == provider for item in providers):
-        provider = default_provider
-    options = agent_composer_options_payload(provider, locale)
+    options = agent_composer_options_payload(target, catalog, locale)
+    legacy = project_legacy_agent_providers(catalog)
     return {
         "available": True,
-        "provider": provider,
-        "defaultProvider": default_provider,
-        "providers": providers,
+        "agentTargetId": target["agentTargetId"],
+        "providerId": target["providerId"],
+        "defaultAgentTargetId": catalog.get("defaultAgentTargetId") or "",
+        "agents": agents,
+        # Deprecated compatibility projection for cached clients.
+        "provider": legacy_provider_for_target(catalog, target["agentTargetId"]) or "",
+        "defaultProvider": legacy["defaultProvider"],
+        "providers": legacy["providers"],
         "models": options["models"],
         "currentModel": options["currentModel"],
         "currentReasoningLevel": options["currentReasoningLevel"],
@@ -1268,6 +1390,10 @@ def runner_options_payload(provider=None, locale=None):
 def empty_runner_options_payload():
     return {
         "available": False,
+        "agentTargetId": "",
+        "providerId": "",
+        "defaultAgentTargetId": "",
+        "agents": [],
         "provider": "",
         "defaultProvider": "",
         "providers": [],
@@ -1279,61 +1405,205 @@ def empty_runner_options_payload():
     }
 
 
-def agent_providers_payload():
+def agent_catalog_payload():
+    try:
+        result = run_tutti_cli(["agent", "list"], timeout=30)
+    except RuntimeError as exc:
+        if not is_exact_unknown_agent_list_error(exc):
+            raise
+        return legacy_agent_catalog_payload()
+    if result.get("schemaVersion") != 1:
+        raise RuntimeError("unsupported Tutti agent catalog schema")
+    agents = normalize_agent_catalog_entries(
+        result.get("agents"), "id", "provider", "name"
+    )
+    default_agent_target_id = clean_agent_target_id(result.get("defaultAgentTargetId"))
+    if default_agent_target_id and not any(
+        item["agentTargetId"] == default_agent_target_id for item in agents
+    ):
+        raise RuntimeError("invalid Tutti default Agent Target")
+    return normalize_agent_catalog(
+        agents,
+        default_agent_target_id,
+        "agent-id",
+    )
+
+
+def legacy_agent_catalog_payload():
     result = run_tutti_cli(["agent", "providers"], timeout=30)
     if result.get("schemaVersion") != 2:
-        raise RuntimeError("unsupported Tutti agent provider catalog schema")
-    providers = []
-    for item in result.get("providers") or []:
+        raise RuntimeError("unsupported Tutti legacy agent provider catalog schema")
+    agents = normalize_agent_catalog_entries(
+        result.get("providers"), "agentTargetId", "providerId", "displayName"
+    )
+    preferred_provider = normalize_provider_id(result.get("defaultProviderId"))
+    matches = [item for item in agents if item["providerId"] == preferred_provider]
+    default_agent_target_id = matches[0]["agentTargetId"] if len(matches) == 1 else ""
+    return normalize_agent_catalog(agents, default_agent_target_id, "provider-compat")
+
+
+def normalize_agent_catalog_entries(values, target_field, provider_field, name_field):
+    agents = []
+    seen = set()
+    for item in values or []:
         if not isinstance(item, dict):
             continue
-        provider = normalize_provider_id(item.get("providerId"))
+        agent_target_id = clean_agent_target_id(item.get(target_field))
+        provider_id = normalize_provider_id(item.get(provider_field))
+        if not agent_target_id or not provider_id or agent_target_id in seen:
+            raise RuntimeError("invalid Tutti Agent Target catalog entry")
+        seen.add(agent_target_id)
         availability = item.get("availability") if isinstance(item.get("availability"), dict) else {}
-        status = str(availability.get("status") or "").strip()
-        if not provider or not is_supported_provider_status(status):
-            continue
-        providers.append(
+        agents.append(
             {
-                "provider": provider,
-                "status": status,
+                "agentTargetId": agent_target_id,
+                "providerId": provider_id,
+                "displayName": clean_optional_string(item.get(name_field)) or agent_target_id,
+                "status": str(availability.get("status") or "unknown").strip().lower(),
                 "detail": str(availability.get("detail") or "").strip(),
             }
         )
+    return agents
+
+
+def normalize_agent_catalog(agents, preferred_target, cli_contract):
+    provider_counts = {}
+    for item in agents:
+        provider_id = item["providerId"]
+        provider_counts[provider_id] = provider_counts.get(provider_id, 0) + 1
+    available = [
+        item
+        for item in agents
+        if is_agent_available(item.get("status"))
+        and (
+            cli_contract == "agent-id"
+            or provider_counts.get(item["providerId"]) == 1
+        )
+    ]
+    default_target = next(
+        (item for item in available if item["agentTargetId"] == preferred_target),
+        available[0] if available else None,
+    )
     return {
-        "defaultProvider": normalize_provider_id(result.get("defaultProviderId")),
-        "providers": providers,
+        "schemaVersion": 1,
+        "cliContract": cli_contract,
+        "defaultAgentTargetId": default_target["agentTargetId"] if default_target else "",
+        "agents": agents,
     }
 
 
-def is_supported_provider_status(status):
+def is_exact_unknown_agent_list_error(error):
+    return bool(re.fullmatch(r"unknown command:\s*agent list", str(error).strip(), re.IGNORECASE))
+
+
+def resolve_agent_target_from_catalog(
+    catalog,
+    agent_target_id=None,
+    legacy_provider=None,
+    use_default=False,
+    require_available=False,
+):
+    agent_target_id = clean_agent_target_id(agent_target_id)
+    legacy_provider = normalize_provider_id(legacy_provider)
+    if agent_target_id and legacy_provider:
+        raise ValueError("provide agentTargetId or deprecated provider, not both")
+    target = None
+    if agent_target_id:
+        target = next(
+            (item for item in catalog["agents"] if item["agentTargetId"] == agent_target_id),
+            None,
+        )
+        if not target:
+            raise ValueError(f"Agent Target is not in the current catalog: {agent_target_id}")
+    elif legacy_provider:
+        matches = [item for item in catalog["agents"] if item["providerId"] == legacy_provider]
+        if len(matches) != 1:
+            if len(matches) > 1:
+                raise ValueError(
+                    f"multiple Agent Targets use provider {legacy_provider}; select an exact Agent Target ID"
+                )
+            raise ValueError(f"provider is not in the current Agent catalog: {legacy_provider}")
+        target = matches[0]
+    elif use_default:
+        default_id = clean_agent_target_id(catalog.get("defaultAgentTargetId"))
+        target = next(
+            (item for item in catalog["agents"] if item["agentTargetId"] == default_id),
+            None,
+        )
+    if not target:
+        raise ValueError("no Agent Target is available")
+    if catalog.get("cliContract") == "provider-compat":
+        provider_matches = [
+            item
+            for item in catalog["agents"]
+            if item["providerId"] == target["providerId"]
+        ]
+        if len(provider_matches) != 1:
+            raise ValueError(
+                f"the old daemon cannot select Agent Target {target['agentTargetId']} because provider "
+                f"{target['providerId']} maps to multiple Agent Targets"
+            )
+    if require_available and not is_agent_available(target.get("status")):
+        raise ValueError(target.get("detail") or f"Agent Target is unavailable: {target['agentTargetId']}")
+    return target
+
+
+def legacy_provider_for_target(catalog, agent_target_id):
+    target = next(
+        (item for item in catalog["agents"] if item["agentTargetId"] == agent_target_id),
+        None,
+    )
+    if not target:
+        return ""
+    matches = [item for item in catalog["agents"] if item["providerId"] == target["providerId"]]
+    return target["providerId"] if len(matches) == 1 else ""
+
+
+def project_legacy_agent_providers(catalog):
+    providers = []
+    for target in catalog["agents"]:
+        provider = legacy_provider_for_target(catalog, target["agentTargetId"])
+        if provider and is_agent_available(target.get("status")):
+            providers.append({"provider": provider, "status": target["status"], "detail": target["detail"]})
+    default_provider = legacy_provider_for_target(catalog, catalog.get("defaultAgentTargetId"))
+    return {"defaultProvider": default_provider, "providers": providers}
+
+
+def canonicalize_runner_settings(settings, require_available=False):
+    settings = normalize_runner_settings(settings)
+    agent_target_id = clean_agent_target_id(settings.get("agentTargetId"))
+    if agent_target_id and not require_available:
+        return settings
+    catalog = agent_catalog_payload()
+    target = resolve_agent_target_from_catalog(
+        catalog,
+        agent_target_id=agent_target_id,
+        legacy_provider=settings.get("provider") if not agent_target_id else None,
+        require_available=require_available,
+    )
+    return {
+        "agentTargetId": target["agentTargetId"],
+        "providerId": target["providerId"],
+        "model": settings.get("model") or "",
+        "reasoningEffort": settings.get("reasoningEffort") or "",
+        "permissionMode": settings.get("permissionMode") or "",
+    }
+
+
+def agent_providers_payload():
+    return project_legacy_agent_providers(agent_catalog_payload())
+
+
+def is_agent_available(status):
     return str(status or "").strip().lower() in {"available", "ready"}
 
 
-def default_provider_from_list(providers, preferred=None):
-    preferred = normalize_provider_id(preferred)
-    if preferred:
-        for item in providers:
-            if (
-                normalize_provider_id(item.get("provider")) == preferred
-                and is_supported_provider_status(item.get("status"))
-            ):
-                return preferred
-    for item in providers:
-        if is_supported_provider_status(item.get("status")):
-            return clean_provider(item.get("provider"))
-    for item in providers:
-        provider = clean_provider(item.get("provider"))
-        if provider:
-            return provider
-    return ""
-
-
-def agent_composer_options_payload(provider, locale=None):
+def agent_composer_options_payload(target, catalog, locale=None):
     args = [
         "agent",
         "composer-options",
-        "--provider",
-        provider,
+        "--agent-id" if catalog["cliContract"] == "agent-id" else "--provider",
+        target["agentTargetId"] if catalog["cliContract"] == "agent-id" else target["providerId"],
     ]
     workspace_root = clean_optional_string(WORKSPACE_ROOT)
     if workspace_root:
@@ -1344,7 +1614,7 @@ def agent_composer_options_payload(provider, locale=None):
     try:
         result = run_tutti_cli(args, timeout=RUNNER_OPTIONS_COMPOSER_TIMEOUT_SECONDS)
     except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return fallback_agent_composer_options(provider)
+        return fallback_agent_composer_options(target["agentTargetId"])
     effective_settings = (
         result.get("effectiveSettings")
         if isinstance(result.get("effectiveSettings"), dict)
@@ -1385,7 +1655,7 @@ def agent_composer_options_payload(provider, locale=None):
     }
 
 
-def fallback_agent_composer_options(_provider):
+def fallback_agent_composer_options(_agent_target_id):
     return {
         "optionsUnavailable": True,
         "models": [],
@@ -1722,6 +1992,18 @@ class Runner:
         concurrency = "queue" if trigger == "schedule" else automation["concurrency"]
         if active and concurrency == "skip":
             return None
+        settings = normalize_runner_settings(
+            automation.get("runnerSettings"),
+            None,
+            automation.get("runnerArgs"),
+        )
+        catalog = agent_catalog_payload()
+        target = resolve_agent_target_from_catalog(
+            catalog,
+            agent_target_id=settings.get("agentTargetId"),
+            legacy_provider=settings.get("provider") if not settings.get("agentTargetId") else None,
+            require_available=True,
+        )
         if active and concurrency == "replace":
             self.cancel(active)
         item_id = run_id()
@@ -1733,14 +2015,20 @@ class Runner:
             "prompt": automation["prompt"],
             "cwd": automation["cwd"],
             "queuedAt": now_iso(),
+            "agentTargetId": target["agentTargetId"],
+            "agentProvider": target["providerId"],
             "artifactDir": str(
                 run_artifact_dir(automation["id"], item_id).resolve()
             ),
         }
         self.store.save_run(item)
+        queued_automation = {
+            **automation,
+            "_agentCliContract": catalog["cliContract"],
+        }
         with self.cv:
             automation_queue = self.queues.setdefault(automation["id"], [])
-            automation_queue.append((item["id"], automation))
+            automation_queue.append((item["id"], queued_automation))
             if automation["id"] not in self.running_automations:
                 self.running_automations.add(automation["id"])
                 threading.Thread(
@@ -1816,11 +2104,22 @@ class Runner:
                 agent_session_id = clean_optional_string(session.get("agentSessionId"))
                 if not agent_session_id:
                     raise RuntimeError("agent session was not created")
+                agent_target_id = clean_agent_target_id(run.get("agentTargetId"))
+                agent_provider = normalize_provider_id(run.get("agentProvider"))
+                if not agent_target_id or not agent_provider:
+                    raise RuntimeError("automation run does not contain an Agent Target snapshot")
+                assert_session_agent_target(
+                    session,
+                    agent_target_id,
+                    allow_provider_compat=automation.get("_agentCliContract") == "provider-compat",
+                    expected_provider_id=agent_provider,
+                )
                 run["agentSessionId"] = agent_session_id
-                run["agentProvider"] = str(session.get("provider") or "codex").strip() or "codex"
                 self.store.save_run(run)
                 if run.get("trigger") == "manual":
-                    open_manual_agent_session_with_retries(agent_session_id, log_file)
+                    open_manual_agent_session_with_retries(
+                        agent_session_id, agent_target_id, log_file
+                    )
                 while True:
                     latest = self.store.get_run(id_)
                     if latest and latest["runStatus"] == "canceling":
@@ -1844,7 +2143,11 @@ class Runner:
                         status = "timed_out"
                         error = run_timeout_error(timeout_seconds)
                         break
-                    session = get_agent_session(agent_session_id, log_file=log_file)
+                    session = get_agent_session(
+                        agent_session_id,
+                        agent_target_id,
+                        log_file=log_file,
+                    )
                     status, error = terminal_agent_status(session.get("status"))
                     if status in {"failed", "canceled"}:
                         break
@@ -1865,7 +2168,11 @@ class Runner:
                         if latest and latest.get("taskStatus"):
                             status = "succeeded"
                             break
-                        messages = agent_session_messages(agent_session_id, log_file=log_file)
+                        messages = agent_session_messages(
+                            agent_session_id,
+                            agent_target_id,
+                            log_file=log_file,
+                        )
                         if agent_messages_have_response(messages):
                             summary = latest_agent_summary_from_messages(messages)
                             status = "succeeded"
@@ -1887,11 +2194,19 @@ class Runner:
                 try:
                     latest_for_summary = self.store.get_run(id_)
                     if latest_for_summary and latest_for_summary.get("taskStatus"):
-                        final_summary = wait_for_final_agent_summary(agent_session_id, log_file=log_file)
+                        final_summary = wait_for_final_agent_summary(
+                            agent_session_id,
+                            agent_target_id,
+                            log_file=log_file,
+                        )
                         if final_summary is not None:
                             summary = final_summary
                     elif summary is None:
-                        summary = latest_agent_summary(agent_session_id, log_file=log_file)
+                        summary = latest_agent_summary(
+                            agent_session_id,
+                            agent_target_id,
+                            log_file=log_file,
+                        )
                 except Exception as exc:
                     if log_file:
                         log_file.write(
@@ -2065,6 +2380,7 @@ SCHEDULER = Scheduler(STORE, RUNNER)
 
 def save_automation_and_wake(item):
     action = "updated" if STORE.get_automation(item.get("id")) else "created"
+    item["runnerSettings"] = canonicalize_runner_settings(item.get("runnerSettings"))
     saved = STORE.save_automation(item)
     SCHEDULER.wake()
     publish_automation_changed(action, saved)
@@ -2135,6 +2451,7 @@ def run_cli_columns():
     return [
         {"key": "id", "label": "ID"},
         {"key": "automation-id", "label": "Task"},
+        {"key": "agent-id", "label": "Agent"},
         {"key": "run-status", "label": "Run status"},
         {"key": "task-status", "label": "Task status"},
         {"key": "trigger", "label": "Trigger"},
@@ -2148,6 +2465,7 @@ def run_cli_rows(runs):
         {
             "id": item["id"],
             "automation-id": item["automationId"],
+            "agent-id": item.get("agentTargetId") or "",
             "run-status": item["runStatus"],
             "task-status": item.get("taskStatus") or "",
             "trigger": item["trigger"],
@@ -2252,16 +2570,29 @@ def automation_payload_from_cli(input_, existing=None):
     payload["schedule"] = cli_schedule(input_, payload["scheduleType"], payload.get("schedule"))
 
     runner_settings = dict(payload.get("runnerSettings") or {})
+    if cli_has(input_, "agent-id") and cli_has(input_, "provider"):
+        raise ValueError("provide --agent-id or deprecated --provider, not both")
+    if "agent-id" in input_:
+        runner_settings["agentTargetId"] = input_["agent-id"]
+        runner_settings.pop("provider", None)
+        runner_settings.pop("providerId", None)
+    elif "provider" in input_:
+        runner_settings["provider"] = input_["provider"]
+        runner_settings.pop("agentTargetId", None)
+        runner_settings.pop("providerId", None)
     for cli_key, settings_key in (
-        ("provider", "provider"),
         ("model", "model"),
         ("reasoning-effort", "reasoningEffort"),
         ("permission-mode", "permissionMode"),
     ):
         if cli_key in input_:
             runner_settings[settings_key] = input_[cli_key]
-    if not existing and not normalize_provider_id(runner_settings.get("provider")):
-        runner_settings["provider"] = default_cli_runner_provider()
+    if (
+        not existing
+        and not clean_agent_target_id(runner_settings.get("agentTargetId"))
+        and not normalize_provider_id(runner_settings.get("provider"))
+    ):
+        runner_settings["agentTargetId"] = default_cli_runner_agent_target()
     if runner_settings:
         payload["runnerSettings"] = runner_settings
     if "runner-args" in input_:
@@ -2383,12 +2714,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, context_payload())
             if path == "/api/agent-providers":
                 return self.json(200, agent_providers_payload())
+            if path == "/api/agent-targets":
+                return self.json(200, agent_catalog_payload())
             if path == "/api/runner-options":
                 return self.json(
                     200,
                     runner_options_payload(
-                        query.get("provider", [None])[0],
-                        query.get("locale", [None])[0],
+                        agent_target_id=query.get("agentTargetId", [None])[0],
+                        legacy_provider=query.get("provider", [None])[0],
+                        locale=query.get("locale", [None])[0],
                     ),
                 )
             if path == "/api/cwd-options":
@@ -2471,7 +2805,10 @@ class Handler(BaseHTTPRequestHandler):
                 run = STORE.get_run(id_)
                 if not run:
                     return self.json(404, {"error": "run not found"})
-                open_agent_session(run.get("agentSessionId"))
+                open_agent_session(
+                    run.get("agentSessionId"),
+                    resolve_run_agent_target_id(run),
+                )
                 return self.json(200, {"opened": True})
             if method == "POST" and path.startswith("/api/runs/") and path.endswith("/review"):
                 id_ = path.split("/")[3]

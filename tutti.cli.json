@@ -111,13 +111,17 @@
             "enum": ["skip", "queue", "replace"],
             "default": "queue"
           },
+          "agent-id": {
+            "type": "string",
+            "description": "Exact Agent Target id. Omit to use the host default Agent. Discover values with `tutti agent list --json`."
+          },
           "provider": {
             "type": "string",
-            "description": "Agent provider id. Omit to use the host default provider. Discover values with `tutti agent providers --json`."
+            "description": "Deprecated compatibility input for old hosts. Accepted only when the provider maps to exactly one Agent Target in the full catalog; prefer --agent-id."
           },
           "model": {
             "type": "string",
-            "description": "Runner model id. Optional when the selected host provider supports its CLI default. Discover provider options with `tutti agent composer-options --provider <provider-id> --json`."
+            "description": "Runner model id. Optional when the selected Agent supports its runtime default. Discover options with `tutti agent composer-options --agent-id <agent-target-id> --json`."
           },
           "reasoning-effort": {
             "type": "string",
@@ -202,13 +206,17 @@
             "description": "Concurrent run policy: skip, queue, or replace.",
             "enum": ["skip", "queue", "replace"]
           },
+          "agent-id": {
+            "type": "string",
+            "description": "Exact Agent Target id. Discover values with `tutti agent list --json`."
+          },
           "provider": {
             "type": "string",
-            "description": "Agent provider id. Discover values with `tutti agent providers --json`."
+            "description": "Deprecated compatibility input for old hosts. Accepted only when the provider maps to exactly one Agent Target in the full catalog; prefer --agent-id."
           },
           "model": {
             "type": "string",
-            "description": "Runner model id. Optional when the selected host provider supports its CLI default. Discover provider options with `tutti agent composer-options --provider <provider-id> --json`."
+            "description": "Runner model id. Optional when the selected Agent supports its runtime default. Discover options with `tutti agent composer-options --agent-id <agent-target-id> --json`."
           },
           "reasoning-effort": {
             "type": "string",
@@ -317,6 +325,7 @@
           "columns": [
             { "key": "id", "label": "ID" },
             { "key": "automation-id", "label": "Task" },
+            { "key": "agent-id", "label": "Agent" },
             { "key": "run-status", "label": "Run status" },
             { "key": "task-status", "label": "Task status" },
             { "key": "trigger", "label": "Trigger" },

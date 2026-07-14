@@ -29,7 +29,164 @@ def load_server_module(temp_root):
     return module
 
 
+def agent_catalog(default_agent_target_id="local:codex", agents=None):
+    if agents is None:
+        agents = [
+            ("local:codex", "codex", "Primary Agent", "available"),
+            ("local:reviewer", "review-provider", "Review Agent", "available"),
+        ]
+    return {
+        "schemaVersion": 1,
+        "defaultAgentTargetId": default_agent_target_id,
+        "agents": [
+            {
+                "id": target_id,
+                "provider": provider_id,
+                "name": name,
+                "availability": {"status": status},
+            }
+            for target_id, provider_id, name, status in agents
+        ],
+    }
+
+
+def normalized_agent_catalog(default_agent_target_id="local:codex", agents=None, cli_contract="agent-id"):
+    if agents is None:
+        agents = [
+            ("local:codex", "codex", "Primary Agent", "available"),
+            ("local:reviewer", "review-provider", "Review Agent", "available"),
+        ]
+    return {
+        "schemaVersion": 1,
+        "cliContract": cli_contract,
+        "defaultAgentTargetId": default_agent_target_id,
+        "agents": [
+            {
+                "agentTargetId": target_id,
+                "providerId": provider_id,
+                "displayName": name,
+                "status": status,
+                "detail": "",
+            }
+            for target_id, provider_id, name, status in agents
+        ],
+    }
+
+
 class RunnerOptionsPayloadTest(unittest.TestCase):
+    def test_agent_catalog_falls_back_only_for_exact_unknown_agent_list(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            calls = []
+
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                calls.append(args)
+                if args == ["agent", "list"]:
+                    raise RuntimeError("unknown command: agent list")
+                if args == ["agent", "providers"]:
+                    return {
+                        "schemaVersion": 2,
+                        "defaultProviderId": "legacy-runtime",
+                        "providers": [
+                            {
+                                "agentTargetId": "local:legacy",
+                                "providerId": "legacy-runtime",
+                                "displayName": "Legacy Agent",
+                                "availability": {"status": "available"},
+                            }
+                        ],
+                    }
+                raise AssertionError(f"unexpected CLI args: {args!r}")
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
+                catalog = module.agent_catalog_payload()
+
+            self.assertEqual(calls, [["agent", "list"], ["agent", "providers"]])
+            self.assertEqual(catalog["cliContract"], "provider-compat")
+            self.assertEqual(catalog["defaultAgentTargetId"], "local:legacy")
+
+    def test_agent_catalog_does_not_fallback_for_ordinary_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            calls = []
+
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                calls.append(args)
+                raise RuntimeError("daemon unavailable")
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
+                with self.assertRaisesRegex(RuntimeError, "daemon unavailable"):
+                    module.agent_catalog_payload()
+
+            self.assertEqual(calls, [["agent", "list"]])
+
+    def test_runner_options_returns_catalog_when_no_agent_is_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+
+            with mock.patch.object(
+                module,
+                "run_tutti_cli",
+                return_value=agent_catalog(
+                    default_agent_target_id="local:offline",
+                    agents=[
+                        ("local:offline", "offline-runtime", "Offline Agent", "unavailable")
+                    ],
+                ),
+            ):
+                payload = module.runner_options_payload()
+
+            self.assertFalse(payload["available"])
+            self.assertEqual(payload["agentTargetId"], "")
+            self.assertEqual(payload["agents"][0]["agentTargetId"], "local:offline")
+
+    def test_legacy_provider_resolution_fails_closed_when_full_catalog_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            catalog = module.normalize_agent_catalog_entries(
+                agent_catalog(
+                    agents=[
+                        ("local:one", "shared-runtime", "One", "available"),
+                        ("local:two", "shared-runtime", "Two", "unavailable"),
+                    ]
+                )["agents"],
+                "id",
+                "provider",
+                "name",
+            )
+            normalized = module.normalize_agent_catalog(catalog, "local:one", "agent-id")
+
+            with self.assertRaisesRegex(ValueError, "multiple Agent Targets"):
+                module.resolve_agent_target_from_catalog(
+                    normalized,
+                    legacy_provider="shared-runtime",
+                    require_available=True,
+                )
+
+    def test_old_daemon_cannot_downgrade_an_exact_target_to_ambiguous_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            agents = module.normalize_agent_catalog_entries(
+                agent_catalog(
+                    agents=[
+                        ("local:one", "shared-runtime", "One", "available"),
+                        ("local:two", "shared-runtime", "Two", "unavailable"),
+                    ]
+                )["agents"],
+                "id",
+                "provider",
+                "name",
+            )
+            catalog = module.normalize_agent_catalog(agents, "local:one", "provider-compat")
+
+            self.assertEqual(catalog["defaultAgentTargetId"], "")
+            with self.assertRaisesRegex(ValueError, "old daemon cannot select"):
+                module.resolve_agent_target_from_catalog(
+                    catalog,
+                    agent_target_id="local:one",
+                    require_available=True,
+                )
+
     def test_runner_options_uses_cli_locale_and_structured_configs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
@@ -37,20 +194,13 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "codex",
-                        "providers": [
-                            {"providerId": "codex", "availability": {"status": "available"}},
-                            {"providerId": "claude-code", "availability": {"status": "available"}},
-                        ],
-                    }
+                if args == ["agent", "list"]:
+                    return agent_catalog()
                 if args == [
                     "agent",
                     "composer-options",
-                    "--provider",
-                    "codex",
+                    "--agent-id",
+                    "local:codex",
                     "--locale",
                     "zh-CN",
                 ]:
@@ -108,21 +258,21 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
-                payload = module.runner_options_payload(provider="codex", locale="zh-CN")
+                payload = module.runner_options_payload(agent_target_id="local:codex", locale="zh-CN")
 
             self.assertEqual(
                 calls[1],
                 [
                     "agent",
                     "composer-options",
-                    "--provider",
-                    "codex",
+                    "--agent-id",
+                    "local:codex",
                     "--locale",
                     "zh-CN",
                 ],
             )
-            self.assertEqual(payload["defaultProvider"], "codex")
-            self.assertEqual(payload["provider"], "codex")
+            self.assertEqual(payload["defaultAgentTargetId"], "local:codex")
+            self.assertEqual(payload["agentTargetId"], "local:codex")
             self.assertEqual(payload["currentModel"], "gpt-5")
             self.assertEqual(payload["currentReasoningLevel"], "high")
             self.assertEqual(payload["permissionMode"], "full-access")
@@ -138,13 +288,9 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
             module = load_server_module(Path(temp_dir))
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "codex",
-                        "providers": [{"providerId": "codex", "availability": {"status": "available"}}],
-                    }
-                if args[:4] == ["agent", "composer-options", "--provider", "codex"]:
+                if args == ["agent", "list"]:
+                    return agent_catalog(agents=[("local:codex", "codex", "Primary Agent", "available")])
+                if args[:4] == ["agent", "composer-options", "--agent-id", "local:codex"]:
                     return {
                         "effectiveSettings": {"model": "gpt-5"},
                         "modelConfig": {"options": []},
@@ -166,7 +312,7 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
-                payload = module.runner_options_payload(provider="codex", locale="en")
+                payload = module.runner_options_payload(agent_target_id="local:codex", locale="en")
 
             self.assertEqual([item["id"] for item in payload["models"]], ["gpt-5", "gpt-5.1"])
             self.assertEqual(payload["currentModel"], "gpt-5")
@@ -177,35 +323,28 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
             timeouts = []
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "codex",
-                        "providers": [
-                            {"providerId": "codex", "availability": {"status": "available"}},
-                            {"providerId": "claude-code", "availability": {"status": "available"}},
-                        ],
-                    }
-                if args[:4] == ["agent", "composer-options", "--provider", "codex"]:
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                if args[:4] == ["agent", "composer-options", "--agent-id", "local:codex"]:
                     timeouts.append(timeout)
                     raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
-                payload = module.runner_options_payload(provider="codex", locale="en")
+                payload = module.runner_options_payload(agent_target_id="local:codex", locale="en")
 
             self.assertEqual(timeouts, [module.RUNNER_OPTIONS_COMPOSER_TIMEOUT_SECONDS])
             self.assertTrue(payload["available"])
-            self.assertEqual(payload["provider"], "codex")
+            self.assertEqual(payload["agentTargetId"], "local:codex")
             self.assertTrue(payload["optionsUnavailable"])
             self.assertEqual(payload["models"], [])
             self.assertEqual(payload["currentModel"], "")
 
-    def test_runner_options_fallback_does_not_invent_claude_model(self):
+    def test_runner_options_fallback_does_not_invent_a_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
 
-            payload = module.fallback_agent_composer_options("claude-code")
+            payload = module.fallback_agent_composer_options("local:reviewer")
 
             self.assertTrue(payload["optionsUnavailable"])
             self.assertEqual(payload["models"], [])
@@ -216,13 +355,9 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
             module = load_server_module(Path(temp_dir))
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "claude-code",
-                        "providers": [{"providerId": "claude-code", "availability": {"status": "available"}}],
-                    }
-                if args[:4] == ["agent", "composer-options", "--provider", "claude-code"]:
+                if args == ["agent", "list"]:
+                    return agent_catalog("local:reviewer", [("local:reviewer", "review-provider", "Review Agent", "available")])
+                if args[:4] == ["agent", "composer-options", "--agent-id", "local:reviewer"]:
                     return {
                         "effectiveSettings": {"model": "claude-sonnet-4-20250514"},
                         "modelConfig": {
@@ -248,7 +383,7 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
-                payload = module.runner_options_payload(provider="claude-code", locale="en")
+                payload = module.runner_options_payload(agent_target_id="local:reviewer", locale="en")
 
             self.assertEqual(
                 [item["id"] for item in payload["models"]],
@@ -261,13 +396,9 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
             module = load_server_module(Path(temp_dir))
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "claude-code",
-                        "providers": [{"providerId": "claude-code", "availability": {"status": "available"}}],
-                    }
-                if args[:4] == ["agent", "composer-options", "--provider", "claude-code"]:
+                if args == ["agent", "list"]:
+                    return agent_catalog("local:reviewer", [("local:reviewer", "review-provider", "Review Agent", "available")])
+                if args[:4] == ["agent", "composer-options", "--agent-id", "local:reviewer"]:
                     return {
                         "effectiveSettings": {
                             "model": "default",
@@ -296,15 +427,15 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
-                payload = module.runner_options_payload(provider="claude-code", locale="en")
+                payload = module.runner_options_payload(agent_target_id="local:reviewer", locale="en")
 
             self.assertEqual([item["id"] for item in payload["models"]], ["default"])
             self.assertEqual(payload["currentModel"], "default")
 
-    def test_normalize_automation_requires_provider(self):
+    def test_normalize_automation_requires_agent_target_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
-            with self.assertRaisesRegex(ValueError, "provider is required"):
+            with self.assertRaisesRegex(ValueError, "agentTargetId is required"):
                 module.normalize_automation(
                     {
                         "name": "Review",
@@ -315,7 +446,7 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     }
                 )
 
-    def test_normalize_automation_allows_codex_default_model(self):
+    def test_normalize_automation_allows_agent_default_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             item = module.normalize_automation(
@@ -323,15 +454,15 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     "name": "Review",
                     "prompt": "Review the workspace.",
                     "cwd": str(Path.cwd()),
-                    "runnerSettings": {"provider": "codex"},
+                    "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex"},
                     "runnerArgs": [],
                 }
             )
 
-            self.assertEqual(item["runnerSettings"]["provider"], "codex")
+            self.assertEqual(item["runnerSettings"]["agentTargetId"], "local:codex")
             self.assertEqual(item["runnerSettings"]["model"], "")
 
-    def test_normalize_automation_allows_claude_code_default_model(self):
+    def test_normalize_automation_allows_another_agent_default_model(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             item = module.normalize_automation(
@@ -339,15 +470,15 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     "name": "Review",
                     "prompt": "Review the workspace.",
                     "cwd": str(Path.cwd()),
-                    "runnerSettings": {"provider": "claude-code"},
+                    "runnerSettings": {"agentTargetId": "local:reviewer", "providerId": "review-provider"},
                     "runnerArgs": [],
                 }
             )
 
-            self.assertEqual(item["runnerSettings"]["provider"], "claude-code")
+            self.assertEqual(item["runnerSettings"]["agentTargetId"], "local:reviewer")
             self.assertEqual(item["runnerSettings"]["model"], "")
 
-    def test_normalize_automation_allows_platform_catalog_providers(self):
+    def test_normalize_automation_allows_platform_catalog_agents(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             item = module.normalize_automation(
@@ -355,11 +486,11 @@ class RunnerOptionsPayloadTest(unittest.TestCase):
                     "name": "Review",
                     "prompt": "Review the workspace.",
                     "cwd": str(Path.cwd()),
-                    "runnerSettings": {"provider": "opencode"},
+                    "runnerSettings": {"agentTargetId": "local:opencode", "providerId": "opencode"},
                     "runnerArgs": [],
                 }
             )
-            self.assertEqual(item["runnerSettings"]["provider"], "opencode")
+            self.assertEqual(item["runnerSettings"]["agentTargetId"], "local:opencode")
 
 
 class ScheduleNormalizationTest(unittest.TestCase):
@@ -373,7 +504,7 @@ class ScheduleNormalizationTest(unittest.TestCase):
                     "cwd": str(Path.cwd()),
                     "scheduleType": "daily",
                     "schedule": {"timeOfDay": "17:30"},
-                    "runnerSettings": {"provider": "codex", "model": "gpt-5"},
+                    "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex", "model": "gpt-5"},
                     "runnerArgs": [],
                 }
             )
@@ -391,7 +522,7 @@ class ScheduleNormalizationTest(unittest.TestCase):
                         "cwd": str(Path.cwd()),
                         "scheduleType": "daily",
                         "schedule": {"timeOfDay": "25:00"},
-                        "runnerSettings": {"provider": "codex", "model": "gpt-5"},
+                        "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex", "model": "gpt-5"},
                         "runnerArgs": [],
                     }
                 )
@@ -459,20 +590,13 @@ class ScheduleNormalizationTest(unittest.TestCase):
             self.assertEqual(item["scheduleType"], "daily")
             self.assertEqual(item["schedule"], {"timeOfDay": "09:00"})
 
-    def test_cli_create_defaults_provider_from_host_options(self):
+    def test_cli_create_defaults_agent_target_from_host_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
 
             def fake_run_tutti_cli(args, timeout=None):
-                if args == ["agent", "providers"]:
-                    return {
-                        "schemaVersion": 2,
-                        "defaultProviderId": "claude-code",
-                        "providers": [
-                            {"providerId": "codex", "availability": {"status": "available"}},
-                            {"providerId": "claude-code", "availability": {"status": "available"}},
-                        ],
-                    }
+                if args == ["agent", "list"]:
+                    return agent_catalog("local:reviewer")
                 raise AssertionError(f"unexpected CLI args: {args!r}")
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
@@ -486,7 +610,7 @@ class ScheduleNormalizationTest(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual(item["runnerSettings"]["provider"], "claude-code")
+            self.assertEqual(item["runnerSettings"]["agentTargetId"], "local:reviewer")
             self.assertEqual(item["runnerSettings"]["model"], "gpt-5")
 
     def test_cli_enabled_false_string_disables_automation(self):
@@ -507,20 +631,41 @@ class ScheduleNormalizationTest(unittest.TestCase):
 
 
 class AgentSessionLaunchTest(unittest.TestCase):
-    def test_manual_run_starts_agent_session_with_show_for_gui_activation(self):
+    def test_old_daemon_uses_provider_only_after_unique_target_mapping(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             calls = []
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                return {"session": {"agentSessionId": "agent-session-1", "provider": "codex"}}
+                if args == ["agent", "list"]:
+                    raise RuntimeError("unknown command: agent list")
+                if args == ["agent", "providers"]:
+                    return {
+                        "schemaVersion": 2,
+                        "defaultProviderId": "legacy-runtime",
+                        "providers": [
+                            {
+                                "agentTargetId": "local:legacy",
+                                "providerId": "legacy-runtime",
+                                "displayName": "Legacy Agent",
+                                "availability": {"status": "available"},
+                            }
+                        ],
+                    }
+                return {
+                    "session": {
+                        "agentSessionId": "agent-session-1",
+                        "provider": "legacy-runtime",
+                    }
+                }
 
             automation = {
                 "name": "Review",
                 "prompt": "Review the workspace.",
-                "runnerSettings": {"provider": "codex"},
+                "runnerSettings": {"provider": "legacy-runtime"},
                 "runnerArgs": [],
+                "_agentCliContract": "provider-compat",
             }
             run = {
                 "id": "run_123",
@@ -528,20 +673,108 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 "prompt": "Review the workspace.",
                 "cwd": str(Path.cwd()),
                 "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:legacy",
+                "agentProvider": "legacy-runtime",
+            }
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
+                session = module.start_agent_session(automation, run, log_file=None)
+
+            start_call = calls[-1]
+            self.assertEqual(start_call[start_call.index("--provider") + 1], "legacy-runtime")
+            self.assertNotIn("--agent-id", start_call)
+            self.assertEqual(session["agentTargetId"], "local:legacy")
+
+    def test_open_agent_session_rejects_a_different_target_before_opening(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            calls = []
+
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                calls.append(args)
+                if args[:2] == ["agent", "get"]:
+                    return {
+                        "session": {
+                            "agentSessionId": "agent-session-1",
+                            "agentTargetId": "local:other",
+                        }
+                    }
+                raise AssertionError("open must not be called after an identity mismatch")
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
+                with self.assertRaisesRegex(RuntimeError, "target mismatch"):
+                    module.open_agent_session("agent-session-1", "local:expected")
+
+            self.assertEqual(len(calls), 1)
+
+    def test_legacy_run_provider_maps_to_one_exact_target_before_opening(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            with mock.patch.object(
+                module,
+                "agent_catalog_payload",
+                return_value=module.normalize_agent_catalog(
+                    module.normalize_agent_catalog_entries(
+                        agent_catalog(
+                            agents=[
+                                ("local:legacy", "legacy-runtime", "Legacy Agent", "available")
+                            ]
+                        )["agents"],
+                        "id",
+                        "provider",
+                        "name",
+                    ),
+                    "local:legacy",
+                    "agent-id",
+                ),
+            ):
+                target_id = module.resolve_run_agent_target_id(
+                    {"agentTargetId": None, "agentProvider": "legacy-runtime"}
+                )
+
+            self.assertEqual(target_id, "local:legacy")
+
+    def test_manual_run_starts_agent_session_with_show_for_gui_activation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            calls = []
+
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                calls.append(args)
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                return {"session": {"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"}}
+
+            automation = {
+                "name": "Review",
+                "prompt": "Review the workspace.",
+                "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex"},
+                "runnerArgs": [],
+                "_agentCliContract": "agent-id",
+            }
+            run = {
+                "id": "run_123",
+                "trigger": "manual",
+                "prompt": "Review the workspace.",
+                "cwd": str(Path.cwd()),
+                "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:codex",
+                "agentProvider": "codex",
             }
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 session = module.start_agent_session(automation, run, log_file=None)
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
-            self.assertEqual(calls[0][:2], ["agent", "start"])
-            self.assertEqual(calls[0][calls[0].index("--provider") + 1], "codex")
-            self.assertEqual(calls[0][calls[0].index("--title") + 1], "Review")
+            start_call = calls[0]
+            self.assertEqual(start_call[:2], ["agent", "start"])
+            self.assertEqual(start_call[start_call.index("--agent-id") + 1], "local:codex")
+            self.assertEqual(start_call[start_call.index("--title") + 1], "Review")
             self.assertEqual(
-                calls[0][calls[0].index("--display-prompt") + 1],
+                start_call[start_call.index("--display-prompt") + 1],
                 "Review the workspace.",
             )
-            self.assertEqual(calls[0][calls[0].index("--show") + 1], "true")
+            self.assertEqual(start_call[start_call.index("--show") + 1], "true")
 
     def test_scheduled_run_stays_visible_without_activating_agent_gui(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -550,13 +783,16 @@ class AgentSessionLaunchTest(unittest.TestCase):
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                return {"session": {"agentSessionId": "agent-session-1", "provider": "codex"}}
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                return {"session": {"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"}}
 
             automation = {
                 "name": "Review",
                 "prompt": "Review the workspace.",
-                "runnerSettings": {"provider": "codex"},
+                "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex"},
                 "runnerArgs": [],
+                "_agentCliContract": "agent-id",
             }
             run = {
                 "id": "run_123",
@@ -564,35 +800,41 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 "prompt": "Review the workspace.",
                 "cwd": str(Path.cwd()),
                 "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:codex",
+                "agentProvider": "codex",
             }
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 session = module.start_agent_session(automation, run, log_file=None)
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
-            self.assertEqual(calls[0][:2], ["agent", "start"])
-            self.assertEqual(calls[0][calls[0].index("--provider") + 1], "codex")
-            self.assertEqual(calls[0][calls[0].index("--title") + 1], "Review")
+            start_call = calls[0]
+            self.assertEqual(start_call[:2], ["agent", "start"])
+            self.assertEqual(start_call[start_call.index("--agent-id") + 1], "local:codex")
+            self.assertEqual(start_call[start_call.index("--title") + 1], "Review")
             self.assertEqual(
-                calls[0][calls[0].index("--display-prompt") + 1],
+                start_call[start_call.index("--display-prompt") + 1],
                 "Review the workspace.",
             )
-            self.assertEqual(calls[0][calls[0].index("--show") + 1], "false")
+            self.assertEqual(start_call[start_call.index("--show") + 1], "false")
 
-    def test_claude_code_run_uses_generic_provider_start(self):
+    def test_second_agent_uses_generic_agent_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             calls = []
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                return {"session": {"agentSessionId": "agent-session-1", "provider": "claude-code"}}
+                if args == ["agent", "list"]:
+                    return agent_catalog("local:reviewer")
+                return {"session": {"agentSessionId": "agent-session-1", "agentTargetId": "local:reviewer", "provider": "review-provider"}}
 
             automation = {
                 "name": "Review",
                 "prompt": "Review the workspace.",
-                "runnerSettings": {"provider": "claude-code"},
+                "runnerSettings": {"agentTargetId": "local:reviewer", "providerId": "review-provider"},
                 "runnerArgs": [],
+                "_agentCliContract": "agent-id",
             }
             run = {
                 "id": "run_123",
@@ -600,6 +842,8 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 "prompt": "Review the workspace.",
                 "cwd": str(Path.cwd()),
                 "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:reviewer",
+                "agentProvider": "review-provider",
             }
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
@@ -607,7 +851,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
             self.assertEqual(calls[0][:2], ["agent", "start"])
-            self.assertEqual(calls[0][calls[0].index("--provider") + 1], "claude-code")
+            self.assertEqual(calls[0][calls[0].index("--agent-id") + 1], "local:reviewer")
 
     def test_runner_args_are_forwarded_without_duplicate_structured_flags(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -616,13 +860,16 @@ class AgentSessionLaunchTest(unittest.TestCase):
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                return {"session": {"agentSessionId": "agent-session-1", "provider": "codex"}}
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                return {"session": {"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"}}
 
             automation = {
                 "name": "Review",
                 "prompt": "Review the workspace.",
-                "runnerSettings": {"provider": "codex", "model": "gpt-5", "reasoningEffort": "high"},
+                "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex", "model": "gpt-5", "reasoningEffort": "high"},
                 "runnerArgs": ["--model", "gpt-4", "--speed", "fast", "--reasoning-effort=low"],
+                "_agentCliContract": "agent-id",
             }
             run = {
                 "id": "run_123",
@@ -630,16 +877,19 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 "prompt": "Review the workspace.",
                 "cwd": str(Path.cwd()),
                 "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:codex",
+                "agentProvider": "codex",
             }
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 module.start_agent_session(automation, run, log_file=None)
 
-            self.assertEqual(calls[0].count("--model"), 1)
-            self.assertEqual(calls[0][calls[0].index("--model") + 1], "gpt-5")
-            self.assertEqual(calls[0].count("--reasoning-effort"), 1)
-            self.assertIn("--speed", calls[0])
-            self.assertIn("fast", calls[0])
+            start_call = calls[0]
+            self.assertEqual(start_call.count("--model"), 1)
+            self.assertEqual(start_call[start_call.index("--model") + 1], "gpt-5")
+            self.assertEqual(start_call.count("--reasoning-effort"), 1)
+            self.assertIn("--speed", start_call)
+            self.assertIn("fast", start_call)
 
     def test_runner_args_keep_supported_flags_when_not_set_structurally(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -648,13 +898,16 @@ class AgentSessionLaunchTest(unittest.TestCase):
 
             def fake_run_tutti_cli(args, timeout=30, log_file=None):
                 calls.append(args)
-                return {"session": {"agentSessionId": "agent-session-1", "provider": "codex"}}
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                return {"session": {"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"}}
 
             automation = {
                 "name": "Review",
                 "prompt": "Review the workspace.",
-                "runnerSettings": {"provider": "codex"},
+                "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex"},
                 "runnerArgs": ["--reasoning-effort", "high", "--permission-mode", "full-access"],
+                "_agentCliContract": "agent-id",
             }
             run = {
                 "id": "run_123",
@@ -662,15 +915,18 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 "prompt": "Review the workspace.",
                 "cwd": str(Path.cwd()),
                 "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:codex",
+                "agentProvider": "codex",
             }
 
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 module.start_agent_session(automation, run, log_file=None)
 
-            self.assertIn("--reasoning-effort", calls[0])
-            self.assertIn("high", calls[0])
-            self.assertIn("--permission-mode", calls[0])
-            self.assertIn("full-access", calls[0])
+            start_call = calls[0]
+            self.assertIn("--reasoning-effort", start_call)
+            self.assertIn("high", start_call)
+            self.assertIn("--permission-mode", start_call)
+            self.assertIn("full-access", start_call)
 
     def test_manual_runner_reopens_created_agent_session_after_persisting_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -679,7 +935,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
             automation = module.STORE.get_automation(run["automationId"])
             opened = []
 
-            def fake_open_agent_session(agent_session_id, log_file=None):
+            def fake_open_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 stored = module.STORE.get_run(run["id"])
                 self.assertEqual(stored["agentSessionId"], agent_session_id)
                 opened.append(agent_session_id)
@@ -688,7 +944,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session", fake_open_agent_session),
                 mock.patch.object(module, "get_agent_session", return_value={"status": "running"}),
@@ -714,7 +970,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session") as open_mock,
                 mock.patch.object(module, "get_agent_session", return_value={"status": "ready"}),
@@ -724,6 +980,151 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 module.Runner(module.STORE).run(run["id"], automation)
 
             open_mock.assert_not_called()
+
+
+class RunAgentSnapshotTest(unittest.TestCase):
+    def save_automation(self, module):
+        return module.STORE.save_automation(
+            module.normalize_automation(
+                {
+                    "name": "Snapshot test",
+                    "prompt": "Review",
+                    "cwd": str(Path.cwd()),
+                    "enabled": False,
+                    "scheduleType": "daily",
+                    "schedule": {"timeOfDay": "09:00"},
+                    "concurrency": "queue",
+                    "runnerSettings": {
+                        "agentTargetId": "local:reviewer",
+                        "providerId": "stale-provider",
+                    },
+                    "runnerArgs": [],
+                    "env": {},
+                }
+            )
+        )
+
+    def enqueue_without_worker(self, module, runner, automation):
+        thread = mock.Mock()
+        with (
+            mock.patch.object(
+                module,
+                "agent_catalog_payload",
+                return_value=normalized_agent_catalog(),
+            ),
+            mock.patch.object(module.threading, "Thread", return_value=thread),
+        ):
+            run = runner.enqueue(automation, "manual")
+        thread.start.assert_called_once_with()
+        return run
+
+    def test_start_validates_provider_against_enqueued_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = {
+                "name": "Review",
+                "prompt": "Review the workspace.",
+                "runnerSettings": {
+                    "agentTargetId": "local:codex",
+                    "providerId": "codex",
+                },
+                "runnerArgs": [],
+                "_agentCliContract": "agent-id",
+            }
+            run = {
+                "id": "run_123",
+                "trigger": "manual",
+                "prompt": "Review the workspace.",
+                "cwd": str(Path.cwd()),
+                "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "local:codex",
+                "agentProvider": "codex",
+            }
+
+            with mock.patch.object(
+                module,
+                "run_tutti_cli",
+                return_value={
+                    "session": {
+                        "agentSessionId": "agent-session-1",
+                        "agentTargetId": "local:codex",
+                        "provider": "different-provider",
+                    }
+                },
+            ):
+                with self.assertRaisesRegex(RuntimeError, "provider mismatch"):
+                    module.start_agent_session(automation, run, log_file=None)
+
+    def test_canceled_before_start_keeps_exact_agent_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+
+            run = self.enqueue_without_worker(module, runner, automation)
+            canceled = runner.cancel(run["id"])
+
+            self.assertEqual(canceled["runStatus"], "canceled")
+            self.assertEqual(canceled["agentTargetId"], "local:reviewer")
+            self.assertEqual(canceled["agentProvider"], "review-provider")
+
+    def test_start_failure_keeps_exact_agent_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+            run = self.enqueue_without_worker(module, runner, automation)
+            queued_automation = runner.queues[automation["id"]][0][1]
+
+            with mock.patch.object(
+                module,
+                "start_agent_session",
+                side_effect=RuntimeError("agent start failed"),
+            ):
+                runner.run(run["id"], queued_automation)
+
+            failed = module.STORE.get_run(run["id"])
+            self.assertEqual(failed["runStatus"], "failed")
+            self.assertEqual(failed["agentTargetId"], "local:reviewer")
+            self.assertEqual(failed["agentProvider"], "review-provider")
+            self.assertEqual(failed["error"], "agent start failed")
+
+    def test_cli_run_json_and_runs_table_include_exact_agent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+            thread = mock.Mock()
+            responses = []
+            handler = object.__new__(module.Handler)
+            handler.json = lambda status, payload: responses.append((status, payload))
+
+            with (
+                mock.patch.object(module, "RUNNER", runner),
+                mock.patch.object(
+                    module,
+                    "agent_catalog_payload",
+                    return_value=normalized_agent_catalog(),
+                ),
+                mock.patch.object(module.threading, "Thread", return_value=thread),
+            ):
+                handler.read_json = lambda: {
+                    "input": {"automation-id": automation["id"]}
+                }
+                handler.handle_cli("/tutti/cli/run")
+
+                run_payload = responses.pop()[1]["value"]["run"]
+                self.assertEqual(run_payload["agentTargetId"], "local:reviewer")
+                self.assertEqual(run_payload["agentProvider"], "review-provider")
+
+                handler.read_json = lambda: {
+                    "input": {"automation-id": automation["id"], "limit": 10}
+                }
+                handler.handle_cli("/tutti/cli/runs")
+
+            table = responses.pop()[1]
+            self.assertIn({"key": "agent-id", "label": "Agent"}, table["columns"])
+            self.assertEqual(table["rows"][0]["agent-id"], "local:reviewer")
 
 
 class RunEventHubTest(unittest.TestCase):
@@ -748,7 +1149,7 @@ class RunEventHubTest(unittest.TestCase):
                         "name": "Review",
                         "prompt": "Review the workspace.",
                         "cwd": str(Path.cwd()),
-                        "runnerSettings": {"provider": "codex", "model": "gpt-5"},
+                        "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex", "model": "gpt-5"},
                     }
                 )
 
@@ -1105,7 +1506,7 @@ class AgentSessionSummaryTest(unittest.TestCase):
                 ],
             ]
 
-            def fake_agent_session_messages(agent_session_id, log_file=None):
+            def fake_agent_session_messages(agent_session_id, expected_agent_target_id=None, log_file=None):
                 self.assertEqual(agent_session_id, "agent-session-1")
                 if len(responses) > 1:
                     return responses.pop(0)
@@ -1126,7 +1527,7 @@ class AgentSessionSummaryTest(unittest.TestCase):
             run = make_run(module, "queued")
             automation = module.STORE.get_automation(run["automationId"])
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 module.complete_run_from_cli({"run-id": run["id"], "status": "success"})
                 return {"status": "ready"}
 
@@ -1134,7 +1535,7 @@ class AgentSessionSummaryTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", side_effect=fake_get_agent_session),
@@ -1242,7 +1643,7 @@ class RunCompletionTest(unittest.TestCase):
             polls = []
             message_reads = []
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 polls.append(agent_session_id)
                 if len(polls) == 1:
                     return {"status": "created"}
@@ -1251,7 +1652,7 @@ class RunCompletionTest(unittest.TestCase):
                 module.complete_run_from_cli({"run-id": run["id"], "status": "success"})
                 return {"status": "ready"}
 
-            def fake_agent_session_messages(agent_session_id, log_file=None):
+            def fake_agent_session_messages(agent_session_id, expected_agent_target_id=None, log_file=None):
                 message_reads.append(agent_session_id)
                 if len(message_reads) == 1:
                     return [
@@ -1273,7 +1674,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", side_effect=fake_get_agent_session),
@@ -1295,7 +1696,7 @@ class RunCompletionTest(unittest.TestCase):
             automation = module.STORE.get_automation(run["automationId"])
             polls = []
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 polls.append(agent_session_id)
                 if len(polls) == 1:
                     return {
@@ -1312,7 +1713,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", side_effect=fake_get_agent_session),
@@ -1344,7 +1745,7 @@ class RunCompletionTest(unittest.TestCase):
             automation = module.STORE.get_automation(run["automationId"])
             polls = []
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 polls.append(agent_session_id)
                 return {
                     "status": "waiting_approval",
@@ -1355,7 +1756,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", side_effect=fake_get_agent_session),
@@ -1377,7 +1778,7 @@ class RunCompletionTest(unittest.TestCase):
             automation = module.STORE.get_automation(run["automationId"])
             polls = []
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 polls.append(agent_session_id)
                 return {
                     "status": "running",
@@ -1388,7 +1789,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", side_effect=fake_get_agent_session),
@@ -1463,7 +1864,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", return_value={"status": "ready"}),
@@ -1498,7 +1899,7 @@ class RunCompletionTest(unittest.TestCase):
             automation = module.STORE.get_automation(run["automationId"])
             ready_seen = threading.Event()
 
-            def fake_get_agent_session(agent_session_id, log_file=None):
+            def fake_get_agent_session(agent_session_id, expected_agent_target_id=None, log_file=None):
                 ready_seen.set()
                 return {"status": "ready"}
 
@@ -1506,7 +1907,7 @@ class RunCompletionTest(unittest.TestCase):
                 mock.patch.object(
                     module,
                     "start_agent_session",
-                    return_value={"agentSessionId": "agent-session-1", "provider": "codex"},
+                    return_value={"agentSessionId": "agent-session-1", "agentTargetId": "local:codex", "provider": "codex"},
                 ),
                 mock.patch.object(module, "open_agent_session"),
                 mock.patch.object(module, "get_agent_session", fake_get_agent_session),
@@ -1586,7 +1987,7 @@ def make_run(module, run_status, trigger="manual"):
                 "scheduleType": "daily",
                 "schedule": {"timeOfDay": "09:00"},
                 "concurrency": "queue",
-                "runnerSettings": {"provider": "codex", "model": "gpt-5"},
+                "runnerSettings": {"agentTargetId": "local:codex", "providerId": "codex", "model": "gpt-5"},
                 "runnerArgs": [],
                 "env": {},
             }
@@ -1603,6 +2004,8 @@ def make_run(module, run_status, trigger="manual"):
             "queuedAt": module.now_iso(),
             "startedAt": module.now_iso() if run_status != "queued" else None,
             "artifactDir": str(Path(module.LOG_DIR) / "runs" / automation["id"] / "run_123"),
+            "agentTargetId": "local:codex",
+            "agentProvider": "codex",
         }
     )
 

@@ -27,8 +27,8 @@ Examples:
 
 ```sh
 tutti automation create --name "Daily review" --prompt "Review today's changes"
-tutti automation create --name "Hourly triage" --prompt "Triage open issues" --provider codex --schedule-type interval --interval-minutes 60
-tutti automation create --name "Weekday report" --prompt "Write a status report" --provider claude-code --schedule-type weekly --days-of-week 1,2,3,4,5 --time-of-day 09:00
+tutti automation create --name "Hourly triage" --prompt "Triage open issues" --agent-id <agent-target-id> --schedule-type interval --interval-minutes 60
+tutti automation create --name "Weekday report" --prompt "Write a status report" --agent-id <agent-target-id> --schedule-type weekly --days-of-week 1,2,3,4,5 --time-of-day 09:00
 ```
 
 Schedule arguments:
@@ -42,9 +42,10 @@ Schedule arguments:
 
 Runner arguments:
 
-- `--provider <provider-id>` is optional when creating a task. Omit it to use the host default provider.
-- Discover provider values with `tutti agent providers --json`. Use an available or ready provider supported by Automation, such as `codex` or `claude-code`.
-- `--model <model-id>` is optional when the selected host provider supports its CLI default. Discover provider options with `tutti agent composer-options --provider <provider-id> --json`.
+- `--agent-id <agent-target-id>` is optional when creating a task. Omit it to use the host default Agent.
+- Discover currently supported Agent Targets and their availability with `tutti agent list --json`.
+- `--model <model-id>` is optional when the selected Agent supports its runtime default. Discover Agent options with `tutti agent composer-options --agent-id <agent-target-id> --json`.
+- `--provider <provider-id>` is deprecated compatibility input for old hosts. It is accepted only when the provider maps to exactly one Agent Target in the full catalog; otherwise Automation fails closed and requires `--agent-id`.
 - `--reasoning-effort high`
 - `--permission-mode full-access`
 - `--runner-args "--model <model-id>"`
@@ -97,6 +98,9 @@ Examples:
 tutti automation runs
 tutti automation runs --automation-id aut_123 --limit 20
 ```
+
+The table includes the exact Agent Target id snapshotted when each run was
+queued. JSON output exposes the same value as `run.agentTargetId`.
 
 ### `tutti automation complete-run`
 

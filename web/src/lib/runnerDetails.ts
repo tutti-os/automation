@@ -3,12 +3,12 @@ import type {
   RunnerModel,
   RunnerOptions,
   RunnerPermissionMode,
-  RunnerProvider,
+  RunnerAgentTarget,
   RunnerReasoningLevel,
 } from '../types';
 
 export type RunnerDisplayDetails = {
-  provider: string;
+  agent: string;
   model: string;
   reasoning: string;
   review: string;
@@ -64,28 +64,29 @@ function readReasoningConfig(value: string, result: { reasoningEffort: string })
   if (match) result.reasoningEffort = (match[1] ?? '').replace(/^["']|["']$/g, '');
 }
 
-function runnerProviders(runnerOptions: RunnerOptions): RunnerProvider[] {
-  const providers = runnerOptions.providers ?? [];
-  return providers.length > 0 ? providers : [{ provider: runnerOptions.provider || 'codex' }];
+function runnerAgentTargets(runnerOptions: RunnerOptions): RunnerAgentTarget[] {
+  return runnerOptions.agents ?? [];
 }
 
-function runnerProviderId(provider?: RunnerProvider | null): string {
-  return normalizeText(provider?.provider) || normalizeText(provider?.id);
+function runnerAgentTargetId(agent?: RunnerAgentTarget | null): string {
+  return normalizeText(agent?.agentTargetId);
 }
 
 function runnerReasoningId(reasoning?: RunnerReasoningLevel | null): string {
   return normalizeText(reasoning?.effort) || normalizeText(reasoning?.value) || normalizeText(reasoning?.id);
 }
 
-function providerLabel(provider?: RunnerProvider | null): string {
-  const explicit = normalizeText(provider?.label) || normalizeText(provider?.name);
+function agentTargetLabel(agent?: RunnerAgentTarget | null): string {
+  const explicit = normalizeText(agent?.displayName) || normalizeText(agent?.label) || normalizeText(agent?.name);
   if (explicit) return explicit;
-  return titleize(runnerProviderId(provider) || 'codex');
+  return runnerAgentTargetId(agent);
 }
 
-function providerLabelForId(providerId: string, runnerOptions: RunnerOptions): string {
-  const matched = runnerProviders(runnerOptions).find((item) => runnerProviderId(item) === providerId);
-  return providerLabel(matched ?? { provider: providerId });
+function agentTargetLabelForId(agentTargetId: string, runnerOptions: RunnerOptions): string {
+  const matched = runnerAgentTargets(runnerOptions).find(
+    (item) => runnerAgentTargetId(item) === agentTargetId,
+  );
+  return matched ? agentTargetLabel(matched) : agentTargetId;
 }
 
 function modelLabel(model: RunnerModel | null | undefined, t: (key: string) => string): string {
@@ -151,42 +152,48 @@ function resolveRunnerSelection(
   runnerOptions: RunnerOptions,
 ) {
   const parsed = parseRunnerArgs(automation.runnerArgs ?? []);
-  const providers = runnerProviders(runnerOptions);
-  const preferredProvider = normalizeText(automation.runnerSettings?.provider);
-  const provider =
-    preferredProvider && providers.some((item) => runnerProviderId(item) === preferredProvider) ?
-      preferredProvider
-    : preferredProvider ||
-      normalizeText(runnerOptions.provider) ||
-      normalizeText(runnerOptions.defaultProvider) ||
-      runnerProviderId(providers[0]) ||
-      'codex';
-  const runnerOptionsMatchProvider =
-    !normalizeText(runnerOptions.provider) || normalizeText(runnerOptions.provider) === provider;
+  const agents = runnerAgentTargets(runnerOptions);
+  const exactAgentTargetId = normalizeText(automation.runnerSettings?.agentTargetId);
+  const legacyProvider = normalizeText(automation.runnerSettings?.provider);
+  const legacyMatches = agents.filter(
+    (item) => normalizeText(item.providerId) === legacyProvider,
+  );
+  const preferredAgentTargetId =
+    exactAgentTargetId || (legacyProvider && legacyMatches.length === 1 ? runnerAgentTargetId(legacyMatches[0]) : '');
+  const agentTargetId =
+    preferredAgentTargetId ||
+    (exactAgentTargetId || legacyProvider ? '' :
+      normalizeText(runnerOptions.agentTargetId) ||
+      normalizeText(runnerOptions.defaultAgentTargetId) ||
+      runnerAgentTargetId(agents[0]) ||
+      '');
+  const runnerOptionsMatchAgentTarget =
+    !normalizeText(runnerOptions.agentTargetId) ||
+    normalizeText(runnerOptions.agentTargetId) === agentTargetId;
   const model =
     normalizeText(automation.runnerSettings?.model) ||
     parsed.model ||
-    (runnerOptionsMatchProvider ? normalizeText(runnerOptions.currentModel) : '') ||
-    (runnerOptionsMatchProvider ? runnerOptions.models?.[0]?.id ?? '' : '') ||
+    (runnerOptionsMatchAgentTarget ? normalizeText(runnerOptions.currentModel) : '') ||
+    (runnerOptionsMatchAgentTarget ? runnerOptions.models?.[0]?.id ?? '' : '') ||
     '';
-  const selectedModel = runnerOptionsMatchProvider ? findRunnerModel(runnerOptions, model) : null;
+  const selectedModel = runnerOptionsMatchAgentTarget ? findRunnerModel(runnerOptions, model) : null;
   const reasoningEffort =
     normalizeText(automation.runnerSettings?.reasoningEffort) ||
     parsed.reasoningEffort ||
-    (runnerOptionsMatchProvider ? normalizeText(runnerOptions.currentReasoningLevel) : '') ||
-    (runnerOptionsMatchProvider ? normalizeText(selectedModel?.defaultReasoningLevel) : '') ||
-    (runnerOptionsMatchProvider ? runnerReasoningId(selectedModel?.reasoningLevels?.[0]) : '') ||
+    (runnerOptionsMatchAgentTarget ? normalizeText(runnerOptions.currentReasoningLevel) : '') ||
+    (runnerOptionsMatchAgentTarget ? normalizeText(selectedModel?.defaultReasoningLevel) : '') ||
+    (runnerOptionsMatchAgentTarget ? runnerReasoningId(selectedModel?.reasoningLevels?.[0]) : '') ||
     '';
   const permissionMode =
     normalizeText(automation.runnerSettings?.permissionMode) ||
-    (runnerOptionsMatchProvider ? normalizeText(runnerOptions.permissionMode) : '') ||
-    (runnerOptionsMatchProvider ? normalizeText(runnerOptions.permissionConfig?.defaultValue) : '') ||
-    (runnerOptionsMatchProvider ?
+    (runnerOptionsMatchAgentTarget ? normalizeText(runnerOptions.permissionMode) : '') ||
+    (runnerOptionsMatchAgentTarget ? normalizeText(runnerOptions.permissionConfig?.defaultValue) : '') ||
+    (runnerOptionsMatchAgentTarget ?
       runnerOptions.permissionConfig?.modes?.find((item) => item.current || item.effective)?.id
     : '') ||
-    (runnerOptionsMatchProvider ? runnerOptions.permissionConfig?.modes?.[0]?.id ?? '' : '') ||
+    (runnerOptionsMatchAgentTarget ? runnerOptions.permissionConfig?.modes?.[0]?.id ?? '' : '') ||
     '';
-  return { provider, model, reasoningEffort, permissionMode, selectedModel };
+  return { agentTargetId, model, reasoningEffort, permissionMode, selectedModel };
 }
 
 export function runnerDetailsFromSettings(
@@ -195,7 +202,7 @@ export function runnerDetailsFromSettings(
   t: (key: string) => string,
 ): RunnerDisplayDetails {
   const selection = resolveRunnerSelection(automation, runnerOptions);
-  const provider = providerLabelForId(selection.provider, runnerOptions);
+  const agent = agentTargetLabelForId(selection.agentTargetId, runnerOptions);
   const reasoningId = selection.reasoningEffort;
   const reviewMode = selection.permissionMode;
 
@@ -203,7 +210,7 @@ export function runnerDetailsFromSettings(
     const reasoning = reasoningId ? reasoningLabel(reasoningId, t) : '';
     const review = reviewMode ? permissionModeLabel(reviewMode, t) : '';
     return {
-      provider,
+      agent,
       model: selection.model || t('common.default'),
       reasoning,
       review,
@@ -221,7 +228,7 @@ export function runnerDetailsFromSettings(
     : '';
 
   return {
-    provider,
+    agent,
     model: model ? modelLabel(model, t) : selection.model || t('common.default'),
     reasoning,
     review,

@@ -2087,7 +2087,22 @@ class Runner:
                 run_artifact_dir(automation["id"], item_id).resolve()
             ),
         }
-        saved = self.store.save_run(item)
+        try:
+            saved = self.store.save_run(item)
+        except Exception:
+            # save_run commits before reading the saved projection back. If
+            # that post-commit read fails, the caller observes an enqueue
+            # failure even though a durable queued row already exists. Remove
+            # that possible row so the scheduler can safely record one failed
+            # occurrence instead of leaving an unowned duplicate behind.
+            try:
+                self.store.delete_queued_run(item["id"])
+            except Exception as cleanup_exc:
+                print(
+                    f"failed to roll back queued run {item['id']}: {cleanup_exc}",
+                    flush=True,
+                )
+            raise
         queued_automation = {
             **automation,
             "_agentCliContract": catalog["cliContract"],
@@ -2195,7 +2210,49 @@ class Runner:
                 id_, automation = automation_queue.pop(0)
                 if not automation_queue:
                     self.queues.pop(automation_id, None)
-            self.run(id_, automation)
+            try:
+                self.run(id_, automation)
+            except Exception as exc:
+                # A failure before run() enters its guarded execution block,
+                # or a best-effort event publication failure after it exits,
+                # must not terminate the only worker that owns the remaining
+                # in-memory queue.
+                self.record_worker_failure(id_, exc)
+
+    def record_worker_failure(self, id_, error):
+        try:
+            run = self.store.get_run(id_)
+            if not run or run["runStatus"] not in {
+                "queued",
+                "running",
+                "canceling",
+            }:
+                print(f"run {id_} worker error after completion: {error}", flush=True)
+                return run
+            canceled = run["runStatus"] == "canceling"
+            run.update(
+                {
+                    "runStatus": "canceled" if canceled else "failed",
+                    "finishedAt": now_iso(),
+                    "error": "Canceled by user." if canceled else str(error),
+                    "taskStatus": run.get("taskStatus") or (None if canceled else "fail"),
+                }
+            )
+            saved = self.store.save_run(run)
+        except Exception as record_exc:
+            print(
+                f"failed to record worker error for run {id_}: {record_exc}",
+                flush=True,
+            )
+            return None
+        try:
+            publish_run_finished(saved)
+        except Exception as publish_exc:
+            print(
+                f"failed to publish worker error for run {id_}: {publish_exc}",
+                flush=True,
+            )
+        return saved
 
     def run(self, id_, automation):
         run = self.store.get_run(id_)

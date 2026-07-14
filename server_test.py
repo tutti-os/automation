@@ -1165,6 +1165,34 @@ class RunAgentSnapshotTest(unittest.TestCase):
             self.assertNotIn(automation["id"], runner.queues)
             self.assertNotIn(automation["id"], runner.running_automations)
 
+    def test_enqueue_rolls_back_when_save_fails_after_commit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+            save_run = module.STORE.save_run
+
+            def save_then_fail(item):
+                save_run(item)
+                raise RuntimeError("saved projection unavailable")
+
+            with (
+                mock.patch.object(
+                    module,
+                    "agent_catalog_payload",
+                    return_value=normalized_agent_catalog(),
+                ),
+                mock.patch.object(module.STORE, "save_run", side_effect=save_then_fail),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "saved projection unavailable"
+                ):
+                    runner.enqueue(automation, "schedule")
+
+            self.assertEqual(module.STORE.list_runs(automation["id"]), [])
+            self.assertNotIn(automation["id"], runner.queues)
+            self.assertNotIn(automation["id"], runner.running_automations)
+
     def test_enqueue_keeps_one_committed_run_when_event_delivery_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
@@ -1191,6 +1219,52 @@ class RunAgentSnapshotTest(unittest.TestCase):
             self.assertEqual([run["id"] for run in runs], [queued["id"]])
             self.assertEqual(runs[0]["runStatus"], "queued")
             self.assertEqual(runner.queues[automation["id"]][0][0], queued["id"])
+
+    def test_worker_error_fails_current_run_and_continues_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+            first = self.enqueue_without_worker(module, runner, automation)
+            with (
+                mock.patch.object(
+                    module,
+                    "agent_catalog_payload",
+                    return_value=normalized_agent_catalog(),
+                ),
+                mock.patch.object(module.threading, "Thread") as thread,
+            ):
+                second = runner.enqueue(automation, "manual")
+            thread.assert_not_called()
+            processed = []
+
+            def run_with_first_failure(id_, _automation):
+                if id_ == first["id"]:
+                    raise RuntimeError("worker setup failed")
+                processed.append(id_)
+                run = module.STORE.get_run(id_)
+                run.update(
+                    {
+                        "runStatus": "failed",
+                        "finishedAt": module.now_iso(),
+                        "error": "second run handled",
+                        "taskStatus": "fail",
+                    }
+                )
+                module.STORE.save_run(run)
+
+            with mock.patch.object(runner, "run", side_effect=run_with_first_failure):
+                runner.loop_automation(automation["id"])
+
+            failed = module.STORE.get_run(first["id"])
+            handled = module.STORE.get_run(second["id"])
+            self.assertEqual(failed["runStatus"], "failed")
+            self.assertEqual(failed["error"], "worker setup failed")
+            self.assertEqual(failed["taskStatus"], "fail")
+            self.assertEqual(handled["runStatus"], "failed")
+            self.assertEqual(processed, [second["id"]])
+            self.assertNotIn(automation["id"], runner.queues)
+            self.assertNotIn(automation["id"], runner.running_automations)
 
     def test_start_failure_keeps_exact_agent_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:

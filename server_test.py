@@ -1539,6 +1539,51 @@ class SchedulerTest(unittest.TestCase):
             self.assertTrue(advanced)
             self.assertNotEqual(module.STORE.get_automation(automation["id"])["nextRunAt"], due_at)
 
+    def test_failed_legacy_provider_occurrence_advances_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            now = module.datetime.now(module.timezone.utc)
+            automation = module.STORE.save_automation(
+                module.normalize_automation(
+                    {
+                        "name": "Unavailable legacy provider task",
+                        "prompt": "Review",
+                        "cwd": str(Path.cwd()),
+                        "enabled": True,
+                        "scheduleType": "interval",
+                        "schedule": {"intervalMinutes": 15},
+                        "concurrency": "queue",
+                        "runnerSettings": {"agentTargetId": "local:reviewer"},
+                        "runnerArgs": [],
+                        "env": {},
+                    }
+                )
+            )
+            due_at = (now - module.timedelta(minutes=1)).isoformat()
+            with module.STORE.lock:
+                module.STORE.db.execute(
+                    "UPDATE automations SET runner_settings_json=?, next_run_at=? WHERE id=?",
+                    ('{"provider":"codex"}', due_at, automation["id"]),
+                )
+                module.STORE.db.commit()
+            runner = module.Runner(module.STORE)
+            scheduler = module.Scheduler(module.STORE, runner, autostart=False)
+            catalog = normalized_agent_catalog(
+                agents=[("local:codex", "codex", "Legacy Agent", "unavailable")]
+            )
+
+            with mock.patch.object(module, "agent_catalog_payload", return_value=catalog):
+                scheduler.run_due_once(now=now)
+                scheduler.run_due_once(now=now)
+
+            runs = module.STORE.list_runs(automation["id"])
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["runStatus"], "failed")
+            self.assertIn("unavailable", runs[0]["error"].lower())
+            current = module.STORE.get_automation(automation["id"])
+            self.assertNotEqual(current["nextRunAt"], due_at)
+            self.assertGreater(module.parse_iso(current["nextRunAt"]), now)
+
 
 class FakeSchedulerStore:
     def __init__(self, next_run_at, due_automations=None):

@@ -1140,6 +1140,58 @@ class RunAgentSnapshotTest(unittest.TestCase):
             self.assertEqual(failed["error"], "Agent Target is unavailable")
             self.assertIsNotNone(failed["finishedAt"])
 
+    def test_enqueue_rolls_back_durable_queue_when_worker_cannot_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+
+            with (
+                mock.patch.object(
+                    module,
+                    "agent_catalog_payload",
+                    return_value=normalized_agent_catalog(),
+                ),
+                mock.patch.object(
+                    module.threading,
+                    "Thread",
+                    side_effect=RuntimeError("worker unavailable"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "worker unavailable"):
+                    runner.enqueue(automation, "schedule")
+
+            self.assertEqual(module.STORE.list_runs(automation["id"]), [])
+            self.assertNotIn(automation["id"], runner.queues)
+            self.assertNotIn(automation["id"], runner.running_automations)
+
+    def test_enqueue_keeps_one_committed_run_when_event_delivery_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+            thread = mock.Mock()
+
+            with (
+                mock.patch.object(
+                    module,
+                    "agent_catalog_payload",
+                    return_value=normalized_agent_catalog(),
+                ),
+                mock.patch.object(module.threading, "Thread", return_value=thread),
+                mock.patch.object(
+                    module,
+                    "publish_run_started",
+                    side_effect=RuntimeError("subscriber unavailable"),
+                ),
+            ):
+                queued = runner.enqueue(automation, "schedule")
+
+            runs = module.STORE.list_runs(automation["id"])
+            self.assertEqual([run["id"] for run in runs], [queued["id"]])
+            self.assertEqual(runs[0]["runStatus"], "queued")
+            self.assertEqual(runner.queues[automation["id"]][0][0], queued["id"])
+
     def test_start_failure_keeps_exact_agent_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
@@ -1309,6 +1361,71 @@ class SchedulerTest(unittest.TestCase):
             self.assertEqual([item["id"] for item in store.saved], ["aut_bad", "aut_good"])
             self.assertTrue(all(item["nextRunAt"] for item in store.saved))
 
+    def test_schedule_advance_does_not_overwrite_a_concurrent_edit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            now = module.datetime(2026, 1, 1, 3, 0, 0, tzinfo=module.timezone.utc)
+            automation = module.STORE.save_automation(
+                module.normalize_automation(
+                    {
+                        "name": "Before",
+                        "prompt": "Review",
+                        "cwd": str(Path.cwd()),
+                        "enabled": True,
+                        "scheduleType": "interval",
+                        "schedule": {"intervalMinutes": 15},
+                        "concurrency": "queue",
+                        "runnerSettings": {"agentTargetId": "local:reviewer"},
+                        "runnerArgs": [],
+                        "env": {},
+                    }
+                )
+            )
+            stale = dict(automation)
+            edited = {**automation, "name": "After", "updatedAt": module.now_iso()}
+            module.STORE.save_automation(edited)
+
+            advanced = module.STORE.advance_automation_schedule(
+                stale,
+                module.now_iso(),
+                module.compute_next_run(stale, now),
+            )
+
+            self.assertFalse(advanced)
+            current = module.STORE.get_automation(automation["id"])
+            self.assertEqual(current["name"], "After")
+            self.assertEqual(current["nextRunAt"], edited["nextRunAt"])
+
+    def test_schedule_advance_does_not_restore_a_deleted_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = module.STORE.save_automation(
+                module.normalize_automation(
+                    {
+                        "name": "Delete me",
+                        "prompt": "Review",
+                        "cwd": str(Path.cwd()),
+                        "enabled": True,
+                        "scheduleType": "interval",
+                        "schedule": {"intervalMinutes": 15},
+                        "concurrency": "queue",
+                        "runnerSettings": {"agentTargetId": "local:reviewer"},
+                        "runnerArgs": [],
+                        "env": {},
+                    }
+                )
+            )
+            module.STORE.delete_automation(automation["id"])
+
+            advanced = module.STORE.advance_automation_schedule(
+                automation,
+                module.now_iso(),
+                automation["nextRunAt"],
+            )
+
+            self.assertFalse(advanced)
+            self.assertIsNone(module.STORE.get_automation(automation["id"]))
+
 
 class FakeSchedulerStore:
     def __init__(self, next_run_at, due_automations=None):
@@ -1322,8 +1439,9 @@ class FakeSchedulerStore:
     def next_scheduled_run_at(self):
         return self.next_run_at
 
-    def save_automation(self, automation):
-        self.saved.append(dict(automation))
+    def advance_automation_schedule(self, automation, updated_at, next_run_at):
+        saved = {**automation, "updatedAt": updated_at, "nextRunAt": next_run_at}
+        self.saved.append(saved)
         return automation
 
 

@@ -271,6 +271,50 @@ class Store:
             self.db.commit()
             return self.get_automation(item["id"])
 
+    def advance_automation_schedule(self, snapshot, updated_at, next_run_at):
+        """Advance only the unchanged row observed by the scheduler scan."""
+        with self.lock:
+            result = self.db.execute(
+                """
+                UPDATE automations
+                SET updated_at=?, next_run_at=?
+                WHERE id=?
+                  AND name=?
+                  AND prompt=?
+                  AND cwd=?
+                  AND enabled=?
+                  AND schedule_type=?
+                  AND schedule_json=?
+                  AND concurrency=?
+                  AND runner_settings_json=?
+                  AND runner_args_json=?
+                  AND env_json=?
+                  AND created_at=?
+                  AND updated_at=?
+                  AND next_run_at IS ?
+                """,
+                (
+                    updated_at,
+                    next_run_at,
+                    snapshot["id"],
+                    snapshot["name"],
+                    snapshot["prompt"],
+                    snapshot["cwd"],
+                    1 if snapshot["enabled"] else 0,
+                    snapshot["scheduleType"],
+                    json.dumps(snapshot["schedule"], separators=(",", ":")),
+                    snapshot["concurrency"],
+                    json.dumps(snapshot["runnerSettings"], separators=(",", ":")),
+                    json.dumps(snapshot["runnerArgs"], separators=(",", ":")),
+                    json.dumps(snapshot["env"], separators=(",", ":")),
+                    snapshot["createdAt"],
+                    snapshot["updatedAt"],
+                    snapshot.get("nextRunAt"),
+                ),
+            )
+            self.db.commit()
+            return result.rowcount > 0
+
     def delete_automation(self, id_):
         with self.lock:
             result = self.db.execute("DELETE FROM automations WHERE id=?", (id_,))
@@ -377,6 +421,15 @@ class Store:
             )
             self.db.commit()
             return self.get_run(item["id"])
+
+    def delete_queued_run(self, id_):
+        with self.lock:
+            result = self.db.execute(
+                "DELETE FROM runs WHERE id=? AND status='queued'",
+                (id_,),
+            )
+            self.db.commit()
+            return result.rowcount > 0
 
     def complete_run(self, id_, result_status):
         with self.lock:
@@ -2034,23 +2087,44 @@ class Runner:
                 run_artifact_dir(automation["id"], item_id).resolve()
             ),
         }
-        self.store.save_run(item)
+        saved = self.store.save_run(item)
         queued_automation = {
             **automation,
             "_agentCliContract": catalog["cliContract"],
         }
-        with self.cv:
-            automation_queue = self.queues.setdefault(automation["id"], [])
-            automation_queue.append((item["id"], queued_automation))
-            if automation["id"] not in self.running_automations:
-                self.running_automations.add(automation["id"])
-                threading.Thread(
-                    target=self.loop_automation,
-                    args=(automation["id"],),
-                    daemon=True,
-                ).start()
-        saved = self.store.get_run(item["id"])
-        publish_run_started(saved)
+        try:
+            with self.cv:
+                automation_queue = self.queues.setdefault(automation["id"], [])
+                automation_queue.append((item["id"], queued_automation))
+                if automation["id"] not in self.running_automations:
+                    self.running_automations.add(automation["id"])
+                    threading.Thread(
+                        target=self.loop_automation,
+                        args=(automation["id"],),
+                        daemon=True,
+                    ).start()
+        except Exception:
+            # A worker cannot consume this entry until the condition lock is
+            # released. Roll back both queue projections before reporting the
+            # pre-commit failure to the scheduler.
+            with self.cv:
+                self.queues[automation["id"]] = [
+                    (run_id_, queued)
+                    for run_id_, queued in self.queues.get(automation["id"], [])
+                    if run_id_ != item["id"]
+                ]
+                if not self.queues[automation["id"]]:
+                    self.queues.pop(automation["id"], None)
+                self.running_automations.discard(automation["id"])
+            self.store.delete_queued_run(item["id"])
+            raise
+        try:
+            publish_run_started(saved)
+        except Exception as exc:
+            # The run is already durably queued and owned by the worker. Event
+            # delivery is best-effort and must not make the scheduler create a
+            # second failed run for the same due occurrence.
+            print(f"failed to publish queued run {item['id']}: {exc}", flush=True)
         return saved
 
     def record_enqueue_failure(self, automation, trigger, error):
@@ -2420,9 +2494,11 @@ class Scheduler:
                     flush=True,
                 )
             finally:
-                automation["updatedAt"] = now_iso()
-                automation["nextRunAt"] = compute_next_run(automation, now)
-                self.store.save_automation(automation)
+                self.store.advance_automation_schedule(
+                    automation,
+                    now_iso(),
+                    compute_next_run(automation, now),
+                )
 
     def next_wait_seconds(self, now):
         next_run_at = self.store.next_scheduled_run_at()

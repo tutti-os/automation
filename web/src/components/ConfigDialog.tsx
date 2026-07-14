@@ -10,6 +10,7 @@ import {
 import { ChevronDown, X } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { fetchRunnerOptions } from '../lib/runnerOptionsApi';
+import { resolveAutomationAgentTargetId } from '../lib/runnerAgentSelection';
 import { PromptRichTextInput } from './PromptRichTextInput';
 import { RunnerSelectMenu } from './RunnerSelectMenu';
 import { TemplateIcon } from './TemplateIcon';
@@ -93,7 +94,7 @@ export function ConfigDialog({
   useEffect(() => {
     const nextRunnerSelection = resolveRunnerSelection(automation, runnerOptions);
     const nextCwd = automation?.cwd ?? context?.workspaceRoot ?? '';
-    const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+    const preferredAgentTargetId = resolveAutomationAgentTargetId(automation, runnerOptions);
     const globalAgentTargetId = normalizeText(runnerOptions.agentTargetId);
     const agentCatalogMatches =
       !preferredAgentTargetId || preferredAgentTargetId === globalAgentTargetId;
@@ -113,7 +114,7 @@ export function ConfigDialog({
   }, [automation, context, cwdOptions, initialTemplate, runnerOptions, t]);
 
   useEffect(() => {
-    const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+    const preferredAgentTargetId = resolveAutomationAgentTargetId(automation, runnerOptions);
     if (!preferredAgentTargetId) return;
     if (normalizeText(agentTargetId) !== preferredAgentTargetId) return;
     const loadedAgentTargetId = normalizeText(dialogRunnerOptions.agentTargetId);
@@ -695,7 +696,7 @@ function resolveRunnerSelection(
   const agents = runnerAgentTargets(runnerOptions);
   const configuredAgentTargetId = normalizeText(automation?.runnerSettings?.agentTargetId);
   const configuredLegacyProvider = normalizeText(automation?.runnerSettings?.provider);
-  const preferredAgentTargetId = automationAgentTargetId(automation, runnerOptions);
+  const preferredAgentTargetId = resolveAutomationAgentTargetId(automation, runnerOptions);
   const agentTargetId =
     preferredAgentTargetId ||
     (configuredAgentTargetId || configuredLegacyProvider ? '' :
@@ -776,20 +777,6 @@ function availableRunnerAgentTargets(runnerOptions: RunnerOptions): RunnerAgentT
     const status = normalizeText(agent.status).toLowerCase();
     return !status || status === 'available' || status === 'ready';
   });
-}
-
-function automationAgentTargetId(
-  automation: Pick<Automation, 'runnerSettings'> | null | undefined,
-  runnerOptions: RunnerOptions,
-): string {
-  const exact = normalizeText(automation?.runnerSettings?.agentTargetId);
-  if (exact) return exact;
-  const legacyProvider = normalizeText(automation?.runnerSettings?.provider);
-  if (!legacyProvider) return '';
-  const matches = runnerAgentTargets(runnerOptions).filter(
-    (item) => normalizeText(item.providerId) === legacyProvider,
-  );
-  return matches.length === 1 ? runnerAgentTargetId(matches[0]) : '';
 }
 
 function runnerAgentTargetId(agent?: RunnerAgentTarget | null): string {

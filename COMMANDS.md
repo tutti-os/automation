@@ -100,7 +100,7 @@ tutti automation runs --automation-id aut_123 --limit 20
 ```
 
 The table includes the exact Agent Target id snapshotted when each run was
-queued. JSON output exposes the same value as `run.agentTargetId`.
+queued. JSON output exposes the same value on each table row as `agent-id`.
 
 ### `tutti automation complete-run`
 

@@ -2,6 +2,7 @@ import { StatusDot } from '@tutti-os/ui-system';
 import { useEffect, useMemo, useState, type MouseEvent, type RefObject } from 'react';
 import { useI18n } from '../i18n';
 import { runnerDetailsFromSettings } from '../lib/runnerDetails';
+import { resolveAutomationAgentTargetId } from '../lib/runnerAgentSelection';
 import { fetchRunnerOptions, runnerOptionsMatchAgentTarget } from '../lib/runnerOptionsApi';
 import { automationScheduleLabel, formatDate } from '../lib/schedule';
 import type { Automation, RunnerOptions } from '../types';
@@ -100,18 +101,4 @@ export function AutomationStatusSection({
       </div>
     </aside>
   );
-}
-
-function resolveAutomationAgentTargetId(
-  automation: Automation,
-  runnerOptions: RunnerOptions,
-): string {
-  const exact = String(automation.runnerSettings?.agentTargetId ?? '').trim();
-  if (exact) return exact;
-  const legacyProvider = String(automation.runnerSettings?.provider ?? '').trim();
-  if (!legacyProvider) return '';
-  const matches = (runnerOptions.agents ?? []).filter(
-    (item) => String(item.providerId ?? '').trim() === legacyProvider,
-  );
-  return matches.length === 1 ? String(matches[0]?.agentTargetId ?? '').trim() : '';
 }

@@ -6,6 +6,7 @@ import type {
   RunnerAgentTarget,
   RunnerReasoningLevel,
 } from '../types';
+import { resolveAutomationAgentTargetId } from './runnerAgentSelection';
 
 export type RunnerDisplayDetails = {
   agent: string;
@@ -155,11 +156,7 @@ function resolveRunnerSelection(
   const agents = runnerAgentTargets(runnerOptions);
   const exactAgentTargetId = normalizeText(automation.runnerSettings?.agentTargetId);
   const legacyProvider = normalizeText(automation.runnerSettings?.provider);
-  const legacyMatches = agents.filter(
-    (item) => normalizeText(item.providerId) === legacyProvider,
-  );
-  const preferredAgentTargetId =
-    exactAgentTargetId || (legacyProvider && legacyMatches.length === 1 ? runnerAgentTargetId(legacyMatches[0]) : '');
+  const preferredAgentTargetId = resolveAutomationAgentTargetId(automation, runnerOptions);
   const agentTargetId =
     preferredAgentTargetId ||
     (exactAgentTargetId || legacyProvider ? '' :

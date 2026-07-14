@@ -766,7 +766,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 session = module.start_agent_session(automation, run, log_file=None)
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
-            start_call = calls[0]
+            start_call = next(call for call in calls if call[:2] == ["agent", "start"])
             self.assertEqual(start_call[:2], ["agent", "start"])
             self.assertEqual(start_call[start_call.index("--agent-id") + 1], "local:codex")
             self.assertEqual(start_call[start_call.index("--title") + 1], "Review")
@@ -808,7 +808,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 session = module.start_agent_session(automation, run, log_file=None)
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
-            start_call = calls[0]
+            start_call = next(call for call in calls if call[:2] == ["agent", "start"])
             self.assertEqual(start_call[:2], ["agent", "start"])
             self.assertEqual(start_call[start_call.index("--agent-id") + 1], "local:codex")
             self.assertEqual(start_call[start_call.index("--title") + 1], "Review")
@@ -850,8 +850,8 @@ class AgentSessionLaunchTest(unittest.TestCase):
                 session = module.start_agent_session(automation, run, log_file=None)
 
             self.assertEqual(session["agentSessionId"], "agent-session-1")
-            self.assertEqual(calls[0][:2], ["agent", "start"])
-            self.assertEqual(calls[0][calls[0].index("--agent-id") + 1], "local:reviewer")
+            start_call = next(call for call in calls if call[:2] == ["agent", "start"])
+            self.assertEqual(start_call[start_call.index("--agent-id") + 1], "local:reviewer")
 
     def test_runner_args_are_forwarded_without_duplicate_structured_flags(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -884,7 +884,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 module.start_agent_session(automation, run, log_file=None)
 
-            start_call = calls[0]
+            start_call = next(call for call in calls if call[:2] == ["agent", "start"])
             self.assertEqual(start_call.count("--model"), 1)
             self.assertEqual(start_call[start_call.index("--model") + 1], "gpt-5")
             self.assertEqual(start_call.count("--reasoning-effort"), 1)
@@ -922,7 +922,7 @@ class AgentSessionLaunchTest(unittest.TestCase):
             with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 module.start_agent_session(automation, run, log_file=None)
 
-            start_call = calls[0]
+            start_call = next(call for call in calls if call[:2] == ["agent", "start"])
             self.assertIn("--reasoning-effort", start_call)
             self.assertIn("high", start_call)
             self.assertIn("--permission-mode", start_call)
@@ -1041,19 +1041,73 @@ class RunAgentSnapshotTest(unittest.TestCase):
                 "agentProvider": "codex",
             }
 
-            with mock.patch.object(
-                module,
-                "run_tutti_cli",
-                return_value={
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                if args == ["agent", "list"]:
+                    return agent_catalog()
+                return {
                     "session": {
                         "agentSessionId": "agent-session-1",
                         "agentTargetId": "local:codex",
                         "provider": "different-provider",
                     }
-                },
-            ):
+                }
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
                 with self.assertRaisesRegex(RuntimeError, "provider mismatch"):
                     module.start_agent_session(automation, run, log_file=None)
+
+    def test_queued_legacy_target_revalidates_current_full_catalog_before_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            calls = []
+
+            def fake_run_tutti_cli(args, timeout=30, log_file=None):
+                calls.append(args)
+                if args == ["agent", "list"]:
+                    raise RuntimeError("unknown command: agent list")
+                if args == ["agent", "providers"]:
+                    return {
+                        "schemaVersion": 2,
+                        "defaultProviderId": "shared-runtime",
+                        "providers": [
+                            {
+                                "agentTargetId": "team:queued",
+                                "providerId": "shared-runtime",
+                                "displayName": "Queued Agent",
+                                "availability": {"status": "available"},
+                            },
+                            {
+                                "agentTargetId": "team:new-sibling",
+                                "providerId": "shared-runtime",
+                                "displayName": "New Sibling",
+                                "availability": {"status": "available"},
+                            },
+                        ],
+                    }
+                raise AssertionError("agent start must not run after provider ambiguity")
+
+            automation = {
+                "name": "Review",
+                "prompt": "Review the workspace.",
+                "runnerSettings": {"agentTargetId": "team:queued"},
+                "runnerArgs": [],
+                "_agentCliContract": "provider-compat",
+            }
+            run = {
+                "id": "run_queued",
+                "trigger": "schedule",
+                "prompt": "Review the workspace.",
+                "cwd": str(Path.cwd()),
+                "artifactDir": str(Path(temp_dir) / "artifacts"),
+                "agentTargetId": "team:queued",
+                "agentProvider": "shared-runtime",
+            }
+
+            with mock.patch.object(module, "run_tutti_cli", fake_run_tutti_cli):
+                with self.assertRaisesRegex(ValueError, "maps to multiple Agent Targets"):
+                    module.start_agent_session(automation, run, log_file=None)
+
+            self.assertFalse(any(call[:2] == ["agent", "start"] for call in calls))
 
     def test_canceled_before_start_keeps_exact_agent_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1067,6 +1121,24 @@ class RunAgentSnapshotTest(unittest.TestCase):
             self.assertEqual(canceled["runStatus"], "canceled")
             self.assertEqual(canceled["agentTargetId"], "local:reviewer")
             self.assertEqual(canceled["agentProvider"], "review-provider")
+
+    def test_scheduled_enqueue_failure_is_persisted_with_requested_exact_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            automation = self.save_automation(module)
+            runner = module.Runner(module.STORE)
+
+            failed = runner.record_enqueue_failure(
+                automation,
+                "schedule",
+                ValueError("Agent Target is unavailable"),
+            )
+
+            self.assertEqual(failed["runStatus"], "failed")
+            self.assertEqual(failed["agentTargetId"], "local:reviewer")
+            self.assertIsNone(failed["agentProvider"])
+            self.assertEqual(failed["error"], "Agent Target is unavailable")
+            self.assertIsNotNone(failed["finishedAt"])
 
     def test_start_failure_keeps_exact_agent_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1220,6 +1292,23 @@ class SchedulerTest(unittest.TestCase):
             self.assertEqual(runner.enqueued, [("aut_1", "schedule")])
             self.assertEqual(len(store.saved), 1)
 
+    def test_enqueue_failure_is_recorded_and_does_not_block_later_due_tasks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            now = module.datetime(2026, 1, 1, 3, 0, 0, tzinfo=module.timezone.utc)
+            first = fake_interval_automation(module, now, automation_id="aut_bad")
+            second = fake_interval_automation(module, now, automation_id="aut_good")
+            store = FakeSchedulerStore(None, due_automations=[first, second])
+            runner = FakeRunner(fail_ids={"aut_bad"})
+            scheduler = module.Scheduler(store, runner, autostart=False)
+
+            scheduler.run_due_once(now=now)
+
+            self.assertEqual(runner.enqueued, [("aut_good", "schedule")])
+            self.assertEqual(runner.recorded_failures, [("aut_bad", "schedule", "target unavailable")])
+            self.assertEqual([item["id"] for item in store.saved], ["aut_bad", "aut_good"])
+            self.assertTrue(all(item["nextRunAt"] for item in store.saved))
+
 
 class FakeSchedulerStore:
     def __init__(self, next_run_at, due_automations=None):
@@ -1239,17 +1328,24 @@ class FakeSchedulerStore:
 
 
 class FakeRunner:
-    def __init__(self):
+    def __init__(self, fail_ids=None):
         self.enqueued = []
+        self.fail_ids = set(fail_ids or [])
+        self.recorded_failures = []
 
     def enqueue(self, automation, trigger):
+        if automation["id"] in self.fail_ids:
+            raise ValueError("target unavailable")
         self.enqueued.append((automation["id"], trigger))
         return {"id": "run_1"}
 
+    def record_enqueue_failure(self, automation, trigger, error):
+        self.recorded_failures.append((automation["id"], trigger, str(error)))
 
-def fake_interval_automation(module, next_run_at):
+
+def fake_interval_automation(module, next_run_at, automation_id="aut_1"):
     return {
-        "id": "aut_1",
+        "id": automation_id,
         "enabled": True,
         "scheduleType": "interval",
         "schedule": {"intervalMinutes": 15},

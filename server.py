@@ -925,9 +925,21 @@ def start_agent_session(automation, run, log_file):
     provider_id = normalize_provider_id(run.get("agentProvider"))
     if not agent_target_id or not provider_id:
         raise RuntimeError("automation run does not contain an Agent Target snapshot")
-    cli_contract = clean_optional_string(automation.get("_agentCliContract")) or "agent-id"
-    if cli_contract not in {"agent-id", "provider-compat"}:
-        raise RuntimeError(f"unsupported Agent CLI contract: {cli_contract}")
+    # The CLI contract and provider mapping may have changed while this run was
+    # queued. Re-resolve the persisted exact target against the complete current
+    # catalog immediately before launch; provider-compat must still be unique.
+    catalog = agent_catalog_payload()
+    current_target = resolve_agent_target_from_catalog(
+        catalog,
+        agent_target_id=agent_target_id,
+        require_available=True,
+    )
+    if current_target["providerId"] != provider_id:
+        raise RuntimeError(
+            f"Agent Target provider changed while queued: expected {provider_id}, "
+            f"got {current_target['providerId']}"
+        )
+    cli_contract = catalog["cliContract"]
     args = [
         "agent",
         "start",
@@ -989,6 +1001,7 @@ def start_agent_session(automation, run, log_file):
         **session,
         "agentTargetId": agent_target_id,
         "provider": provider_id,
+        "_automationCliContract": cli_contract,
     }
 
 
@@ -2040,6 +2053,35 @@ class Runner:
         publish_run_started(saved)
         return saved
 
+    def record_enqueue_failure(self, automation, trigger, error):
+        item_id = run_id()
+        settings = normalize_runner_settings(
+            automation.get("runnerSettings"),
+            None,
+            automation.get("runnerArgs"),
+        )
+        item = {
+            "id": item_id,
+            "automationId": automation["id"],
+            "trigger": trigger,
+            "runStatus": "failed",
+            "prompt": automation.get("prompt") or "",
+            "cwd": automation.get("cwd") or "",
+            "queuedAt": now_iso(),
+            "finishedAt": now_iso(),
+            "error": str(error),
+            "artifactDir": str(
+                run_artifact_dir(automation["id"], item_id).resolve()
+            ),
+        }
+        requested_target = clean_agent_target_id(settings.get("agentTargetId"))
+        if requested_target:
+            item["agentTargetId"] = requested_target
+        saved = self.store.save_run(item)
+        publish_run_started(saved)
+        publish_run_finished(saved)
+        return saved
+
     def cancel(self, id_):
         with self.cv:
             for automation_id in list(self.queues):
@@ -2111,7 +2153,7 @@ class Runner:
                 assert_session_agent_target(
                     session,
                     agent_target_id,
-                    allow_provider_compat=automation.get("_agentCliContract") == "provider-compat",
+                    allow_provider_compat=session.get("_automationCliContract") == "provider-compat",
                     expected_provider_id=agent_provider,
                 )
                 run["agentSessionId"] = agent_session_id
@@ -2360,11 +2402,27 @@ class Scheduler:
     def run_due_once(self, enqueue_due=True, now=None):
         now = now or datetime.now(timezone.utc)
         for automation in self.store.list_due_automations():
-            if enqueue_due:
-                self.runner.enqueue(automation, "schedule")
-            automation["updatedAt"] = now_iso()
-            automation["nextRunAt"] = compute_next_run(automation, now)
-            self.store.save_automation(automation)
+            try:
+                if enqueue_due:
+                    self.runner.enqueue(automation, "schedule")
+            except Exception as exc:
+                try:
+                    self.runner.record_enqueue_failure(
+                        automation, "schedule", exc
+                    )
+                except Exception as record_exc:
+                    print(
+                        f"scheduler failed to record enqueue error for {automation.get('id')}: {record_exc}",
+                        flush=True,
+                    )
+                print(
+                    f"scheduler skipped {automation.get('id')}: {exc}",
+                    flush=True,
+                )
+            finally:
+                automation["updatedAt"] = now_iso()
+                automation["nextRunAt"] = compute_next_run(automation, now)
+                self.store.save_automation(automation)
 
     def next_wait_seconds(self, now):
         next_run_at = self.store.next_scheduled_run_at()

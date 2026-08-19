@@ -914,13 +914,7 @@ def tutti_cli_command(platform=None):
     return configured
 
 
-APPROVAL_REQUIRED_ERROR = (
-    "Agent requested approval; automation runs cannot wait for interactive approval."
-)
-INPUT_REQUIRED_ERROR = (
-    "Agent requested user input; automation runs cannot wait for interactive input."
-)
-WAITING_AGENT_ERROR = "Agent stopped without an actionable automation result."
+INTERACTIVE_WAIT_REASONS = {"waiting_approval", "waiting_input", "waiting"}
 AGENT_GET_LOG_FIELDS = (
     "agentSessionId",
     "agentTargetId",
@@ -1305,12 +1299,9 @@ def wait_for_agent_stop(
         return "failed", None, summary
     if reason == "canceled":
         return "canceled", "Canceled by user.", summary
-    if reason == "waiting_approval":
-        return "failed", APPROVAL_REQUIRED_ERROR, summary
-    if reason == "waiting_input":
-        return "failed", INPUT_REQUIRED_ERROR, summary
-    if reason == "waiting":
-        return "failed", WAITING_AGENT_ERROR, summary
+    if reason in INTERACTIVE_WAIT_REASONS:
+        time.sleep(AGENT_WAIT_POLL_TIMEOUT_MS / 1000)
+        return None, None, None
     raise RuntimeError(f"agent wait returned unsupported reason: {reason or '<empty>'}")
 
 

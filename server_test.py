@@ -2006,15 +2006,12 @@ class AgentWaitProtocolTest(unittest.TestCase):
                     "turn-1",
                 )
 
-    def test_wait_maps_all_non_success_stop_reasons(self):
+    def test_wait_maps_terminal_non_success_stop_reasons(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module = load_server_module(Path(temp_dir))
             cases = {
                 "failed": ("failed", None),
                 "canceled": ("canceled", "Canceled by user."),
-                "waiting_approval": ("failed", module.APPROVAL_REQUIRED_ERROR),
-                "waiting_input": ("failed", module.INPUT_REQUIRED_ERROR),
-                "waiting": ("failed", module.WAITING_AGENT_ERROR),
             }
             for reason, expected in cases.items():
                 with self.subTest(reason=reason), mock.patch.object(
@@ -2036,6 +2033,34 @@ class AgentWaitProtocolTest(unittest.TestCase):
                     )
                     self.assertEqual((status, error), expected)
                     self.assertIsNone(summary)
+
+    def test_wait_keeps_interactive_reasons_pending(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module = load_server_module(Path(temp_dir))
+            for reason in ("waiting_approval", "waiting_input", "waiting"):
+                with (
+                    self.subTest(reason=reason),
+                    mock.patch.object(module, "AGENT_WAIT_POLL_TIMEOUT_MS", 0),
+                    mock.patch.object(
+                        module,
+                        "run_tutti_cli",
+                        return_value={
+                            "turnId": "turn-1",
+                            "reason": reason,
+                            "session": {
+                                "agentSessionId": "agent-session-1",
+                                "agentTargetId": "local:codex",
+                            },
+                        },
+                    ),
+                ):
+                    result = module.wait_for_agent_stop(
+                        "agent-session-1",
+                        "local:codex",
+                        "turn-1",
+                    )
+
+                    self.assertEqual(result, (None, None, None))
 
     def test_cancel_uses_exact_turn_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2167,37 +2192,6 @@ class RunCompletionTest(unittest.TestCase):
             self.assertEqual(stored["runStatus"], "succeeded")
             self.assertEqual(stored["taskStatus"], "success")
             self.assertEqual(stored["summary"], "Done.")
-
-    def test_runner_fails_when_wait_requires_approval(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            module = load_server_module(Path(temp_dir))
-            run = make_run(module, "queued", trigger="schedule")
-            automation = module.STORE.get_automation(run["automationId"])
-
-            with (
-                mock.patch.object(
-                    module,
-                    "start_agent_session",
-                    return_value={
-                        "agentSessionId": "agent-session-1",
-                        "turnId": "turn-1",
-                        "agentTargetId": "local:codex",
-                        "provider": "codex",
-                    },
-                ),
-                mock.patch.object(module, "open_agent_session"),
-                mock.patch.object(
-                    module,
-                    "wait_for_agent_stop",
-                    return_value=("failed", module.APPROVAL_REQUIRED_ERROR, None),
-                ),
-            ):
-                module.Runner(module.STORE).run(run["id"], automation)
-
-            stored = module.STORE.get_run(run["id"])
-            self.assertEqual(stored["runStatus"], "failed")
-            self.assertEqual(stored["taskStatus"], "fail")
-            self.assertEqual(stored["error"], module.APPROVAL_REQUIRED_ERROR)
 
     def test_runner_times_out_and_cancels_exact_turn(self):
         with tempfile.TemporaryDirectory() as temp_dir:
